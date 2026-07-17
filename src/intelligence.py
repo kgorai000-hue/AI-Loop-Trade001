@@ -59,8 +59,8 @@ class IntelligenceLoop:
     ) -> None:
         self.app_config = app_config
         self.state_store = state_store
-        self.cost_model = cost_model or CostModel(
-            min_cost_bps=float(app_config.get("risk", {}).get("min_cost_bps", 10))
+        self.cost_model = cost_model or CostModel.from_risk_config(
+            app_config.get("risk")
         )
         acfg = app_config.get("anthropic", {})
         self.client = AnthropicClient(
@@ -81,7 +81,7 @@ class IntelligenceLoop:
         )
         self.checker = StrategyChecker(
             client=self.client,
-            model=str(acfg.get("checker_model", "claude-opus-4")),
+            model=str(acfg.get("checker_model", "claude-opus-4-8")),
         )
         self.validator = StrategyValidator(
             StrategyValidator.config_from_dict(app_config.get("validator"))

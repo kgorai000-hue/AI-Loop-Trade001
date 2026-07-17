@@ -25,7 +25,7 @@ def test_round_trip_costs_with_immediate_fills(monkeypatch):
     closes = np.concatenate([[100.0] * 6, [101.0, 102.0, 103.0, 104.0, 105.0, 106.0]])
     frame = _frame(closes)
     params = StrategyParams(long_window=3, short_window=2, max_hold_bars=100)
-    cost = CostModel(min_cost_bps=10.0)
+    cost = CostModel(round_trip_floor=0.001)
     cost_one = cost.one_way_fraction()
     cost_rt = cost.round_trip_fraction()
 
@@ -81,7 +81,7 @@ def test_limit_fill_requires_ohlc_touch(monkeypatch):
     )
 
     result = Backtester(
-        cost_model=CostModel(min_cost_bps=0.0),
+        cost_model=CostModel(round_trip_floor=0.0),
         fill_model=FillModel(enabled=True, ttl_bars=2, slippage_bps=0.0),
         account=AccountConfig(enabled=False),
     ).run(frame, params=params)
@@ -117,7 +117,7 @@ def test_limit_expires_unfilled(monkeypatch):
     )
 
     result = Backtester(
-        cost_model=CostModel(min_cost_bps=0.0),
+        cost_model=CostModel(round_trip_floor=0.0),
         fill_model=FillModel(enabled=True, ttl_bars=1, slippage_bps=0.0),
         account=AccountConfig(enabled=False),
     ).run(frame, params=params)
@@ -148,7 +148,7 @@ def test_limit_fill_applies_adverse_slippage(monkeypatch):
     )
 
     result = Backtester(
-        cost_model=CostModel(min_cost_bps=0.0),
+        cost_model=CostModel(round_trip_floor=0.0),
         fill_model=FillModel(enabled=True, ttl_bars=2, slippage_bps=10.0),
         account=AccountConfig(enabled=False),
     ).run(frame, params=params)
@@ -209,7 +209,7 @@ def test_account_sizing_uses_kelly_lots_not_unit(monkeypatch):
         volume_max=5.0,
     )
     result = Backtester(
-        cost_model=CostModel(min_cost_bps=0.0),
+        cost_model=CostModel(round_trip_floor=0.0),
         fill_model=FillModel(enabled=True, ttl_bars=3, slippage_bps=0.0),
         account=AccountConfig(enabled=True, initial_equity=10_000.0, stop_out_level=0.01),
         symbol_spec=spec,
@@ -239,7 +239,7 @@ def test_account_dd_differs_from_unit_notional_dd(monkeypatch):
     _force_long_signal(monkeypatch, n, 8, 15)
 
     unit = Backtester(
-        cost_model=CostModel(min_cost_bps=0.0),
+        cost_model=CostModel(round_trip_floor=0.0),
         fill_model=FillModel(enabled=True, ttl_bars=5, slippage_bps=0.0),
         account=AccountConfig(enabled=False),
     ).run(frame, params=params)
@@ -256,7 +256,7 @@ def test_account_dd_differs_from_unit_notional_dd(monkeypatch):
         min_lots=0.01,
     )
     acct = Backtester(
-        cost_model=CostModel(min_cost_bps=0.0),
+        cost_model=CostModel(round_trip_floor=0.0),
         fill_model=FillModel(enabled=True, ttl_bars=5, slippage_bps=0.0),
         account=AccountConfig(enabled=True, initial_equity=10_000.0, stop_out_level=0.01),
         symbol_spec=SymbolSpec(
@@ -300,7 +300,7 @@ def test_margin_stop_out_forces_liquidation(monkeypatch):
         max_margin_fraction=1.0,
     )
     result = Backtester(
-        cost_model=CostModel(min_cost_bps=0.0),
+        cost_model=CostModel(round_trip_floor=0.0),
         fill_model=FillModel(enabled=True, ttl_bars=3, slippage_bps=0.0),
         account=AccountConfig(enabled=True, initial_equity=1_000.0, stop_out_level=0.50),
         symbol_spec=SymbolSpec(

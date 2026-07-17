@@ -1,6 +1,52 @@
 from __future__ import annotations
 
-from src.risk import RiskManager
+from types import SimpleNamespace
+
+from src.risk import CostModel, RiskManager
+
+
+def test_round_trip_floor_is_not_doubled():
+    """10 bps config is a round-trip floor, not 10bps each way."""
+    cost = CostModel(round_trip_floor=0.001)
+    assert abs(cost.round_trip_fraction() - 0.001) < 1e-12
+    assert abs(cost.one_way_fraction() - 0.0005) < 1e-12
+
+
+def test_spread_counted_once_per_round_trip():
+    cost = CostModel(
+        spread_fraction=0.0004,  # 4 bps full spread
+        commission_one_way=0.0001,  # 1 bps each side
+        slippage_one_way=0.0,
+        round_trip_floor=0.0,
+    )
+    # RT = 4bps + 2*1bps = 6bps; not 2*(4+1)=10bps
+    assert abs(cost.round_trip_fraction() - 0.0006) < 1e-12
+    assert abs(cost.one_way_fraction() - 0.0003) < 1e-12
+
+
+def test_from_symbol_info_does_not_double_spread():
+    info = SimpleNamespace(
+        spread=4.0,
+        point=1.0,
+        trade_contract_size=1.0,
+        bid=40_000.0,
+        ask=40_004.0,
+    )
+    tick = SimpleNamespace(bid=40_000.0, ask=40_004.0)
+    cost = CostModel.from_symbol_info(
+        info,
+        tick=tick,
+        risk_cfg={"round_trip_floor_bps": 0, "commission_one_way_bps": 0},
+    )
+    # mid=40002; spread frac = 4/40002
+    expected_spread = 4.0 / 40_002.0
+    assert abs(cost.spread_fraction - expected_spread) < 1e-12
+    assert abs(cost.round_trip_fraction() - expected_spread) < 1e-12
+
+
+def test_from_risk_config_accepts_min_cost_bps_alias():
+    cost = CostModel.from_risk_config({"min_cost_bps": 10})
+    assert abs(cost.round_trip_floor - 0.001) < 1e-12
 
 
 def test_max_loss_lots_use_tick_value_not_notional():

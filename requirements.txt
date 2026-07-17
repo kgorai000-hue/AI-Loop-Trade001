@@ -1,6 +1,8 @@
-MetaTrader5>=5.0.45
-numpy>=1.24.0
-pandas>=2.0.0
-scipy>=1.10.0
-PyYAML>=6.0
-anthropic>=0.40.0
+# Cross-platform runtime + test deps (pinned).
+# MetaTrader5 is Windows-only — install via requirements-windows.txt on the VPS.
+numpy==2.5.1
+pandas==3.0.3
+scipy==1.18.0
+PyYAML==6.0.3
+anthropic==0.117.0
+pytest==9.1.1

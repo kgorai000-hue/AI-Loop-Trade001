@@ -195,7 +195,7 @@ class Backtester:
             account.initial_equity = float(initial_equity)
         return cls(
             cost_model=cost_model
-            or CostModel(min_cost_bps=float(app_config.get("risk", {}).get("min_cost_bps", 10))),
+            or CostModel.from_risk_config(app_config.get("risk")),
             fill_model=FillModel.from_config(bcfg),
             account=account,
             symbol_spec=symbol_spec or SymbolSpec.from_config(bcfg),

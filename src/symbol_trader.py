@@ -86,8 +86,8 @@ class SymbolTrader:
     def cost_model(self) -> CostModel:
         info = self.connection.symbol_info(self.symbol)
         tick = self.feed.tick()
-        min_bps = float(self.app_config.get("risk", {}).get("min_cost_bps", 10))
-        return CostModel.from_symbol_info(info, tick=tick, min_cost_bps=min_bps)
+        risk_cfg = self.app_config.get("risk") or {}
+        return CostModel.from_symbol_info(info, tick=tick, risk_cfg=risk_cfg)
 
     def fetch_history(self, months: int = 6) -> Optional[Any]:
         return self.feed.last_n_months(months=months)

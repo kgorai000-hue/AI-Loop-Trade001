@@ -12,58 +12,106 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class CostModel:
-    """Cost per round-trip as a fraction of notional. Floor = min_cost_bps."""
+    """Trading cost as fractions of notional.
 
-    min_cost_bps: float = 10.0  # 10 bps = 0.1%
-    spread_points: Optional[float] = None
-    point: Optional[float] = None
-    commission_per_lot: Optional[float] = None
-    contract_size: Optional[float] = None
-    price: Optional[float] = None
+    Components (all fractions, not bps):
+    - ``spread_fraction``: full bid–ask width (charged **once** per round-trip)
+    - ``commission_one_way``: commission each side
+    - ``slippage_one_way``: assumed slippage each side (separate from FillModel price slip)
+    - ``round_trip_floor``: minimum round-trip cost when live components are tiny/missing
 
-    def one_way_fraction(self) -> float:
-        """Estimated one-way cost as fraction of price."""
-        floor = self.min_cost_bps / 10_000.0
-        parts: list[float] = []
+    ``round_trip = max(floor, spread + 2*(commission + slippage))``
+    ``one_way = round_trip / 2`` so entry+exit bar charges always equal the RT total.
+    """
 
-        if (
-            self.spread_points is not None
-            and self.point is not None
-            and self.price
-            and self.price > 0
-        ):
-            spread_frac = (self.spread_points * self.point) / self.price
-            parts.append(spread_frac)
+    spread_fraction: float = 0.0
+    commission_one_way: float = 0.0
+    slippage_one_way: float = 0.0
+    round_trip_floor: float = 0.001  # 10 bps default floor on round-trip
 
-        if (
-            self.commission_per_lot is not None
-            and self.contract_size
-            and self.price
-            and self.price > 0
-            and self.contract_size > 0
-        ):
-            notional = self.contract_size * self.price
-            if notional > 0:
-                parts.append(self.commission_per_lot / notional)
-
-        if not parts:
-            return floor
-        return max(floor, sum(parts))
+    def _variable_round_trip(self) -> float:
+        spread = max(0.0, float(self.spread_fraction))
+        commission = max(0.0, float(self.commission_one_way))
+        slippage = max(0.0, float(self.slippage_one_way))
+        return spread + 2.0 * (commission + slippage)
 
     def round_trip_fraction(self) -> float:
-        return 2.0 * self.one_way_fraction()
+        """Total cost for entry+exit as a fraction of notional."""
+        return max(float(self.round_trip_floor), self._variable_round_trip())
+
+    def one_way_fraction(self) -> float:
+        """Half of round-trip (entry or exit leg)."""
+        return 0.5 * self.round_trip_fraction()
+
+    @classmethod
+    def from_risk_config(cls, cfg: Optional[dict] = None) -> "CostModel":
+        """Build from ``config.yaml`` ``risk:`` section (offline / no MT5 tick)."""
+        cfg = cfg or {}
+        # Prefer explicit fraction keys; accept bps aliases.
+        floor = cls._fraction_from_cfg(
+            cfg,
+            frac_keys=("round_trip_floor",),
+            bps_keys=("round_trip_floor_bps", "min_cost_bps"),
+            default_bps=10.0,
+        )
+        commission = cls._fraction_from_cfg(
+            cfg,
+            frac_keys=("commission_one_way",),
+            bps_keys=("commission_one_way_bps",),
+            default_bps=0.0,
+        )
+        slippage = cls._fraction_from_cfg(
+            cfg,
+            frac_keys=("slippage_one_way",),
+            bps_keys=("slippage_one_way_bps",),
+            default_bps=0.0,
+        )
+        spread = cls._fraction_from_cfg(
+            cfg,
+            frac_keys=("spread_fraction",),
+            bps_keys=("spread_bps",),
+            default_bps=0.0,
+        )
+        return cls(
+            spread_fraction=spread,
+            commission_one_way=commission,
+            slippage_one_way=slippage,
+            round_trip_floor=floor,
+        )
+
+    @staticmethod
+    def _fraction_from_cfg(
+        cfg: dict,
+        *,
+        frac_keys: tuple[str, ...],
+        bps_keys: tuple[str, ...],
+        default_bps: float,
+    ) -> float:
+        for key in frac_keys:
+            if key in cfg and cfg[key] is not None:
+                return max(0.0, float(cfg[key]))
+        for key in bps_keys:
+            if key in cfg and cfg[key] is not None:
+                return max(0.0, float(cfg[key]) / 10_000.0)
+        return max(0.0, float(default_bps) / 10_000.0)
 
     @classmethod
     def from_symbol_info(
         cls,
         symbol_info: Any,
         tick: Any = None,
-        min_cost_bps: float = 10.0,
+        *,
+        risk_cfg: Optional[dict] = None,
+        min_cost_bps: Optional[float] = None,
     ) -> "CostModel":
+        """Live costs from MT5 symbol + optional risk config overrides."""
+        base = cls.from_risk_config(risk_cfg)
+        if min_cost_bps is not None:
+            base.round_trip_floor = max(0.0, float(min_cost_bps) / 10_000.0)
         if symbol_info is None:
-            return cls(min_cost_bps=min_cost_bps)
+            return base
 
-        spread = float(getattr(symbol_info, "spread", 0) or 0)
+        spread_pts = float(getattr(symbol_info, "spread", 0) or 0)
         point = float(getattr(symbol_info, "point", 0) or 0)
         contract = float(getattr(symbol_info, "trade_contract_size", 0) or 0)
         price = None
@@ -75,6 +123,10 @@ class CostModel:
         if price is None:
             price = float(getattr(symbol_info, "bid", 0) or getattr(symbol_info, "ask", 0) or 0)
 
+        if spread_pts > 0 and point > 0 and price and price > 0:
+            # Full bid–ask as fraction; counted once in round-trip.
+            base.spread_fraction = (spread_pts * point) / price
+
         commission = None
         for attr in ("trade_commission", "commission"):
             val = getattr(symbol_info, attr, None)
@@ -84,22 +136,28 @@ class CostModel:
                     break
                 except (TypeError, ValueError):
                     pass
+        if (
+            commission is not None
+            and commission > 0
+            and contract > 0
+            and price
+            and price > 0
+        ):
+            notional = contract * price
+            if notional > 0:
+                base.commission_one_way = commission / notional
 
-        model = cls(
-            min_cost_bps=min_cost_bps,
-            spread_points=spread if spread > 0 else None,
-            point=point if point > 0 else None,
-            commission_per_lot=commission,
-            contract_size=contract if contract > 0 else None,
-            price=price if price and price > 0 else None,
-        )
         logger.debug(
-            "CostModel one_way=%.5f round_trip=%.5f (floor=%.5f)",
-            model.one_way_fraction(),
-            model.round_trip_fraction(),
-            min_cost_bps / 10_000.0,
+            "CostModel spread=%.6f commission_1w=%.6f slip_1w=%.6f "
+            "one_way=%.6f round_trip=%.6f (floor=%.6f)",
+            base.spread_fraction,
+            base.commission_one_way,
+            base.slippage_one_way,
+            base.one_way_fraction(),
+            base.round_trip_fraction(),
+            base.round_trip_floor,
         )
-        return model
+        return base
 
 
 @dataclass
@@ -125,7 +183,6 @@ class RiskManager:
     max_lots: float = 5.0
     min_lots: float = 0.01
     lookback_trades: int = 50
-    min_cost_bps: float = 10.0
     stop_pct: float = 0.005
     stop_points: Optional[float] = None
     gap_buffer_mult: float = 1.25
@@ -145,7 +202,6 @@ class RiskManager:
             max_lots=float(cfg.get("max_lots", 5.0)),
             min_lots=float(cfg.get("min_lots", 0.01)),
             lookback_trades=int(cfg.get("lookback_trades", 50)),
-            min_cost_bps=float(cfg.get("min_cost_bps", 10)),
             stop_pct=float(cfg.get("stop_pct", 0.005)),
             stop_points=float(stop_points) if stop_points is not None else None,
             gap_buffer_mult=float(cfg.get("gap_buffer_mult", 1.25)),

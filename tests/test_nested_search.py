@@ -76,9 +76,9 @@ def test_run_nested_holdout_not_used_for_fold_selection(monkeypatch):
         },
         "anthropic": {},
     }
-    intel = IntelligenceLoop(app, store, cost_model=CostModel(min_cost_bps=0.0))
+    intel = IntelligenceLoop(app, store, cost_model=CostModel(round_trip_floor=0.0))
     intel.backtester = Backtester(
-        cost_model=CostModel(min_cost_bps=0.0),
+        cost_model=CostModel(round_trip_floor=0.0),
         fill_model=FillModel(enabled=False),
         account=AccountConfig(enabled=False),
     )
@@ -152,7 +152,7 @@ def test_validate_can_skip_oos_gate_for_holdout():
         )
     )
     bt = Backtester(
-        cost_model=CostModel(min_cost_bps=0.0),
+        cost_model=CostModel(round_trip_floor=0.0),
         fill_model=FillModel(enabled=False),
         account=AccountConfig(enabled=False),
     )

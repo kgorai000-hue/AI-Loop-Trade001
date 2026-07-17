@@ -50,7 +50,7 @@ class StrategyChecker:
     def __init__(
         self,
         client: AnthropicClient,
-        model: str = "claude-opus-4",
+        model: str = "claude-opus-4-8",
     ) -> None:
         self.client = client
         self.model = model

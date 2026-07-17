@@ -23,6 +23,26 @@ TIMEFRAME_MAP = {
     "D1": mt5.TIMEFRAME_D1,
 }
 
+TIMEFRAME_SECONDS = {
+    "M1": 60,
+    "M5": 300,
+    "M15": 900,
+    "M30": 1800,
+    "H1": 3600,
+    "H4": 14400,
+    "D1": 86400,
+}
+
+BARS_PER_DAY = {
+    "M1": 1440,
+    "M5": 288,
+    "M15": 96,
+    "M30": 48,
+    "H1": 24,
+    "H4": 6,
+    "D1": 1,
+}
+
 
 class DataFeed:
     """Fetch OHLCV bars for a symbol via an MT5Connection."""
@@ -34,6 +54,10 @@ class DataFeed:
         if self.timeframe_name not in TIMEFRAME_MAP:
             raise ValueError(f"Unsupported timeframe: {timeframe}")
         self.timeframe = TIMEFRAME_MAP[self.timeframe_name]
+
+    @property
+    def bar_seconds(self) -> int:
+        return int(TIMEFRAME_SECONDS[self.timeframe_name])
 
     def ensure_symbol(self) -> bool:
         info = self.connection.symbol_info(self.symbol)
@@ -68,6 +92,8 @@ class DataFeed:
         self,
         date_from: datetime,
         date_to: Optional[datetime] = None,
+        *,
+        closed_only: bool = True,
     ) -> Optional[pd.DataFrame]:
         if not self.ensure_symbol():
             return None
@@ -88,26 +114,64 @@ class DataFeed:
                 self.connection.last_error(),
             )
             return None
-        return self._to_df(rates)
+        df = self._to_df(rates)
+        if closed_only:
+            df = self.drop_forming_bars(df, as_of=date_to)
+            if df is None or df.empty:
+                return None
+        return df
+
+    def drop_forming_bars(
+        self,
+        df: pd.DataFrame,
+        *,
+        as_of: Optional[datetime | pd.Timestamp] = None,
+    ) -> pd.DataFrame:
+        """Keep bars whose period has fully elapsed as of ``as_of`` (UTC).
+
+        A bar that opened at ``t`` on this timeframe is complete only when
+        ``as_of >= t + bar_period``. MT5 ``copy_rates_range(..., now)`` often
+        includes the still-forming bar; history/backtest must drop it.
+        """
+        if df is None or df.empty or "time" not in df.columns:
+            return df
+        if as_of is None:
+            as_of_ts = pd.Timestamp.now(tz="UTC")
+        else:
+            as_of_ts = pd.Timestamp(as_of)
+            if as_of_ts.tzinfo is None:
+                as_of_ts = as_of_ts.tz_localize("UTC")
+            else:
+                as_of_ts = as_of_ts.tz_convert("UTC")
+
+        last_closed_open = as_of_ts - pd.Timedelta(seconds=self.bar_seconds)
+        times = pd.to_datetime(df["time"], utc=True)
+        kept = df.loc[times <= last_closed_open].reset_index(drop=True)
+        dropped = len(df) - len(kept)
+        if dropped:
+            logger.debug(
+                "%s dropped %d forming/incomplete bar(s) (as_of=%s, tf=%s)",
+                self.symbol,
+                dropped,
+                as_of_ts.isoformat(),
+                self.timeframe_name,
+            )
+        return kept
 
     def last_n_months(self, months: int = 6, pad_bars: int = 300) -> Optional[pd.DataFrame]:
-        """Fetch ~`months` of history plus warmup bars for indicators."""
+        """Fetch ~`months` of *closed* history plus warmup bars for indicators."""
         now = datetime.now(timezone.utc)
         date_from = now - timedelta(days=int(months * 30.5) + 5)
-        df = self.copy_rates_range(date_from, now)
+        df = self.copy_rates_range(date_from, now, closed_only=True)
         if df is None:
-            bars_per_day = {
-                "M1": 1440,
-                "M5": 288,
-                "M15": 96,
-                "M30": 48,
-                "H1": 24,
-                "H4": 6,
-                "D1": 1,
-            }
-            per_day = bars_per_day.get(self.timeframe_name, 48)
+            per_day = BARS_PER_DAY.get(self.timeframe_name, 48)
             count = int(months * 30.5 * per_day) + pad_bars
-            df = self.copy_rates(count)
+            # Closed bars only; time filter covers any residual incomplete bar.
+            df = self.copy_closed_rates(count)
+            if df is not None:
+                df = self.drop_forming_bars(df, as_of=now)
+                if df.empty:
+                    df = None
         return df
 
     def tick(self) -> Optional[Any]:

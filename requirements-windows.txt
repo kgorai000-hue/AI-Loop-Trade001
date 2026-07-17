@@ -1,0 +1,3 @@
+# Windows VPS / live MT5 terminal (x86-64 wheels only on PyPI).
+-r requirements.txt
+MetaTrader5==5.0.5735
