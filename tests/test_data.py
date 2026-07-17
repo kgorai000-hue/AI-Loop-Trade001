@@ -12,6 +12,18 @@ class Connection:
     def symbol_info(self, symbol):
         return object()
 
+    def copy_rates_from_pos(self, symbol, timeframe, start_pos, count):
+        return mt5.copy_rates_from_pos(symbol, timeframe, start_pos, count)
+
+    def copy_rates_range(self, symbol, timeframe, date_from, date_to):
+        return mt5.copy_rates_range(symbol, timeframe, date_from, date_to)
+
+    def symbol_info_tick(self, symbol):
+        return mt5.symbol_info_tick(symbol)
+
+    def last_error(self):
+        return mt5.last_error()
+
 
 def test_copy_closed_rates_excludes_forming_bar(monkeypatch):
     seen = {}

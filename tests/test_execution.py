@@ -21,6 +21,25 @@ class Connection:
     def symbol_info(self, symbol):
         return SimpleNamespace(digits=1, point=0.1, filling_mode=2, trade_stops_level=0)
 
+    def symbol_info_tick(self, symbol):
+        return mt5.symbol_info_tick(symbol)
+
+    def positions_get(self, *, symbol=None):
+        if symbol is None:
+            return mt5.positions_get()
+        return mt5.positions_get(symbol=symbol)
+
+    def orders_get(self, *, symbol=None):
+        if symbol is None:
+            return mt5.orders_get()
+        return mt5.orders_get(symbol=symbol)
+
+    def order_send(self, request):
+        return mt5.order_send(request)
+
+    def last_error(self):
+        return mt5.last_error()
+
 
 def _position(side, volume=1.0, ticket=42, magic=260717):
     return SimpleNamespace(
@@ -299,7 +318,7 @@ def test_send_treats_placed_as_success(monkeypatch):
             comment="placed",
         ),
     )
-    result = OrderExecutor._send(
+    result = OrderExecutor(Connection())._send(
         {"action": mt5.TRADE_ACTION_PENDING, "symbol": "#US30"},
         "order",
     )
@@ -319,7 +338,7 @@ def test_send_treats_done_partial_as_success(monkeypatch):
             comment="partial",
         ),
     )
-    result = OrderExecutor._send({"action": mt5.TRADE_ACTION_DEAL}, "close")
+    result = OrderExecutor(Connection())._send({"action": mt5.TRADE_ACTION_DEAL}, "close")
     assert result.ok is True
     assert result.retcode == mt5.TRADE_RETCODE_DONE_PARTIAL
 

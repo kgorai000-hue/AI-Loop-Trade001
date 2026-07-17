@@ -115,25 +115,25 @@ class OrderExecutor:
 
     def _positions_get(self, symbol: str) -> Optional[list[Any]]:
         """MT5 positions query: None = error, [] = success/empty, else rows."""
-        if not self.connection.ensure():
-            logger.error("positions_get skipped: MT5 not connected symbol=%s", symbol)
-            return None
-        raw = mt5.positions_get(symbol=symbol)
+        raw = self.connection.positions_get(symbol=symbol)
         if raw is None:
-            err = mt5.last_error()
-            logger.error("positions_get failed symbol=%s: %s", symbol, err)
+            logger.error(
+                "positions_get failed symbol=%s: %s",
+                symbol,
+                self.connection.last_error(),
+            )
             return None
         return list(raw)
 
     def _orders_get(self, symbol: str) -> Optional[list[Any]]:
         """MT5 orders query: None = error, [] = success/empty, else rows."""
-        if not self.connection.ensure():
-            logger.error("orders_get skipped: MT5 not connected symbol=%s", symbol)
-            return None
-        raw = mt5.orders_get(symbol=symbol)
+        raw = self.connection.orders_get(symbol=symbol)
         if raw is None:
-            err = mt5.last_error()
-            logger.error("orders_get failed symbol=%s: %s", symbol, err)
+            logger.error(
+                "orders_get failed symbol=%s: %s",
+                symbol,
+                self.connection.last_error(),
+            )
             return None
         return list(raw)
 
@@ -194,7 +194,7 @@ class OrderExecutor:
         return 0.0
 
     def _limit_price(self, symbol: str, side: Signal) -> Optional[float]:
-        tick = mt5.symbol_info_tick(symbol)
+        tick = self.connection.symbol_info_tick(symbol)
         info = self.connection.symbol_info(symbol)
         if tick is None or info is None:
             return None
@@ -308,7 +308,7 @@ class OrderExecutor:
                 "order": ticket,
                 "symbol": symbol,
             }
-            result = mt5.order_send(request)
+            result = self.connection.order_send(request)
             if result and self._retcode_ok(result.retcode):
                 cancelled.append(ticket)
             else:
@@ -317,7 +317,7 @@ class OrderExecutor:
                 if result is not None:
                     detail = getattr(result, "comment", None) or getattr(result, "retcode", None)
                 else:
-                    detail = mt5.last_error()
+                    detail = self.connection.last_error()
                 logger.warning(
                     "Failed to cancel pending order=%s detail=%s", ticket, detail
                 )
@@ -390,7 +390,7 @@ class OrderExecutor:
         symbol = str(position.symbol)
         if not self.connection.ensure():
             return OrderResult(ok=False, message="not connected")
-        tick = mt5.symbol_info_tick(symbol)
+        tick = self.connection.symbol_info_tick(symbol)
         info = self.connection.symbol_info(symbol)
         if tick is None or info is None:
             return OrderResult(ok=False, message="missing tick/info")
@@ -869,11 +869,10 @@ class OrderExecutor:
         except (TypeError, ValueError):
             return False
 
-    @staticmethod
-    def _send(request: dict[str, Any], operation: str) -> OrderResult:
-        result = mt5.order_send(request)
+    def _send(self, request: dict[str, Any], operation: str) -> OrderResult:
+        result = self.connection.order_send(request)
         if result is None:
-            err = mt5.last_error()
+            err = self.connection.last_error()
             logger.error("%s order_send returned None: %s", operation, err)
             return OrderResult(ok=False, message=str(err), request=request)
         ok = OrderExecutor._retcode_ok(result.retcode)

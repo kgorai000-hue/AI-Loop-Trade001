@@ -38,10 +38,17 @@ class Connection:
             trade_tick_value=1.0,
             digits=1,
             trade_stops_level=0,
+            bid=100.0,
         )
 
     def account_info(self):
         return SimpleNamespace(equity=1000.0, margin=0.0, margin_free=1000.0)
+
+    def order_calc_margin(self, order_type, symbol, volume, price):
+        return 100.0
+
+    def ensure(self):
+        return True
 
 
 class Risk:

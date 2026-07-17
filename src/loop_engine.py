@@ -91,6 +91,7 @@ class LoopEngine:
         )
 
     def start_connection(self) -> bool:
+        self.connection.start()
         return self.connection.connect()
 
     def stop(self) -> None:

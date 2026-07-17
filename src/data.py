@@ -45,15 +45,17 @@ class DataFeed:
         MT5 position 0 is the currently forming bar. Callers that make trading
         decisions should use :meth:`copy_closed_rates` instead.
         """
-        if not self.connection.ensure() or not self.ensure_symbol():
+        if not self.ensure_symbol():
             return None
-        rates = mt5.copy_rates_from_pos(self.symbol, self.timeframe, start_pos, count)
+        rates = self.connection.copy_rates_from_pos(
+            self.symbol, self.timeframe, start_pos, count
+        )
         if rates is None or len(rates) == 0:
             logger.warning(
                 "copy_rates_from_pos empty for %s %s: %s",
                 self.symbol,
                 self.timeframe_name,
-                mt5.last_error(),
+                self.connection.last_error(),
             )
             return None
         return self._to_df(rates)
@@ -67,7 +69,7 @@ class DataFeed:
         date_from: datetime,
         date_to: Optional[datetime] = None,
     ) -> Optional[pd.DataFrame]:
-        if not self.connection.ensure() or not self.ensure_symbol():
+        if not self.ensure_symbol():
             return None
         if date_to is None:
             date_to = datetime.now(timezone.utc)
@@ -76,12 +78,14 @@ class DataFeed:
         if date_to.tzinfo is None:
             date_to = date_to.replace(tzinfo=timezone.utc)
 
-        rates = mt5.copy_rates_range(self.symbol, self.timeframe, date_from, date_to)
+        rates = self.connection.copy_rates_range(
+            self.symbol, self.timeframe, date_from, date_to
+        )
         if rates is None or len(rates) == 0:
             logger.warning(
                 "copy_rates_range empty for %s: %s",
                 self.symbol,
-                mt5.last_error(),
+                self.connection.last_error(),
             )
             return None
         return self._to_df(rates)
@@ -107,9 +111,9 @@ class DataFeed:
         return df
 
     def tick(self) -> Optional[Any]:
-        if not self.connection.ensure() or not self.ensure_symbol():
+        if not self.ensure_symbol():
             return None
-        return mt5.symbol_info_tick(self.symbol)
+        return self.connection.symbol_info_tick(self.symbol)
 
     @staticmethod
     def _to_df(rates) -> pd.DataFrame:

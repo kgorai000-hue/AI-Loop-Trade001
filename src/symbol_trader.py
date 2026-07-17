@@ -283,11 +283,9 @@ class SymbolTrader:
             import MetaTrader5 as mt5
 
             order_type = mt5.ORDER_TYPE_BUY if side == Signal.LONG else mt5.ORDER_TYPE_SELL
-            margin = mt5.order_calc_margin(order_type, self.symbol, 1.0, float(price))
-            if margin is None:
-                return None
-            value = float(margin)
-            return value if value > 0 else None
+            return self.connection.order_calc_margin(
+                order_type, self.symbol, 1.0, float(price)
+            )
         except Exception:
             logger.debug("%s order_calc_margin unavailable", self.symbol, exc_info=True)
             return None
