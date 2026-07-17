@@ -75,7 +75,10 @@ validator:
   sharpe_max: 3.0
   p_value_max: 0.05
   oos_degradation_max: 0.30
-  is_fraction: 0.70
+  is_fraction: 0.70             # inner IS/OOS split within each train window
+  holdout_fraction: 0.15        # final untouched tail (scored once)
+  wf_folds: 3                   # outer walk-forward folds on pre-holdout data
+  wf_min_train_fraction: 0.40
 
 optimizer:
   long_windows: [180, 200, 220, 240, 260, 280]
@@ -83,6 +86,8 @@ optimizer:
   max_hold_bars: [8, 12, 16, 24]
   sharpe_degrade_trigger: 0.20   # relative drop vs last accepted
   ic_degrade_trigger: 0.20
+  nested_search: true            # inner search → outer WF → holdout once
+  nested_inner: grid             # grid | auto (LLM then grid) for each WF fold
 
 anthropic:
   maker_model: "claude-sonnet-4-5"

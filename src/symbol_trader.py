@@ -435,18 +435,8 @@ class SymbolTrader:
             symbol_spec=symbol_spec,
             initial_equity=initial_equity,
         )
-        from .validator import ValidatorConfig
-
-        vcfg = self.app_config.get("validator", {})
         validator = StrategyValidator(
-            ValidatorConfig(
-                max_drawdown=float(vcfg.get("max_drawdown", 0.10)),
-                sharpe_min=float(vcfg.get("sharpe_min", 1.5)),
-                sharpe_max=float(vcfg.get("sharpe_max", 3.0)),
-                p_value_max=float(vcfg.get("p_value_max", 0.05)),
-                oos_degradation_max=float(vcfg.get("oos_degradation_max", 0.30)),
-                is_fraction=float(vcfg.get("is_fraction", 0.70)),
-            )
+            StrategyValidator.config_from_dict(self.app_config.get("validator"))
         )
         params = self.strategy.params
         val, full = validator.validate(df, params, backtester=bt)
@@ -480,20 +470,26 @@ class SymbolTrader:
             state_store=self.store,
             cost_model=self.cost_model(),
         )
-        outcome = intel.run(df)
+        use_nested = bool(self.app_config.get("optimizer", {}).get("nested_search", True))
+        outcome = intel.run_nested(df) if use_nested else intel.run(df)
         if outcome.best_params is not None and outcome.best_validation is not None:
             self.strategy.update_params(outcome.best_params)
             v = outcome.best_validation
+            metrics = {
+                "sharpe": v.sharpe,
+                "max_drawdown": v.max_drawdown,
+                "p_value": v.p_value,
+                "ic": v.ic,
+                "oos_degradation": v.oos_degradation,
+            }
+            if outcome.outer_mean_sharpe is not None:
+                metrics["outer_mean_sharpe"] = outcome.outer_mean_sharpe
+            if outcome.holdout_validation is not None:
+                metrics["holdout_sharpe"] = outcome.holdout_validation.sharpe
             self.store.update_state(
                 params=outcome.best_params.as_dict(),
                 accepted=True,
-                last_metrics={
-                    "sharpe": v.sharpe,
-                    "max_drawdown": v.max_drawdown,
-                    "p_value": v.p_value,
-                    "ic": v.ic,
-                    "oos_degradation": v.oos_degradation,
-                },
+                last_metrics=metrics,
             )
             logger.info(
                 "%s applied optimized params %s via %s",
@@ -515,6 +511,11 @@ class SymbolTrader:
             "checker_rejected": outcome.checker_rejected,
             "best_params": outcome.best_params.as_dict() if outcome.best_params else None,
             "best_validation": outcome.best_validation.as_dict() if outcome.best_validation else None,
+            "outer_mean_sharpe": outcome.outer_mean_sharpe,
+            "holdout_validation": (
+                outcome.holdout_validation.as_dict() if outcome.holdout_validation else None
+            ),
+            "fold_results": outcome.fold_results,
             "top": outcome.rankings[:5],
         }
 

@@ -18,6 +18,10 @@ class ValidatorConfig:
     p_value_max: float = 0.05
     oos_degradation_max: float = 0.30
     is_fraction: float = 0.70
+    # Nested search: outer walk-forward + final holdout (used once)
+    holdout_fraction: float = 0.15
+    wf_folds: int = 3
+    wf_min_train_fraction: float = 0.40
 
 
 @dataclass
@@ -120,9 +124,37 @@ class StrategyValidator:
         df: pd.DataFrame,
         params: StrategyParams,
         backtester: Optional[Backtester] = None,
+        *,
+        apply_oos_gate: bool = True,
     ) -> tuple[ValidationResult, BacktestResult]:
+        """Validate params on ``df``.
+
+        When ``apply_oos_gate`` is True (inner search), also compute an IS/OOS
+        split *within* ``df`` for degradation. When False (final holdout), gate
+        only on the window metrics so the holdout is not re-split for selection.
+        """
         bt = backtester or Backtester()
         full = bt.run(df, params=params)
-        is_r, oos_r, deg = bt.run_is_oos(df, params=params, is_fraction=self.config.is_fraction)
+        if apply_oos_gate:
+            is_r, oos_r, deg = bt.run_is_oos(
+                df, params=params, is_fraction=self.config.is_fraction
+            )
+        else:
+            is_r, oos_r, deg = full, full, 0.0
         result = self.validate_reports(full, is_r, oos_r, deg)
         return result, full
+
+    @classmethod
+    def config_from_dict(cls, vcfg: Optional[dict] = None) -> ValidatorConfig:
+        vcfg = vcfg or {}
+        return ValidatorConfig(
+            max_drawdown=float(vcfg.get("max_drawdown", 0.10)),
+            sharpe_min=float(vcfg.get("sharpe_min", 1.5)),
+            sharpe_max=float(vcfg.get("sharpe_max", 3.0)),
+            p_value_max=float(vcfg.get("p_value_max", 0.05)),
+            oos_degradation_max=float(vcfg.get("oos_degradation_max", 0.30)),
+            is_fraction=float(vcfg.get("is_fraction", 0.70)),
+            holdout_fraction=float(vcfg.get("holdout_fraction", 0.15)),
+            wf_folds=int(vcfg.get("wf_folds", 3)),
+            wf_min_train_fraction=float(vcfg.get("wf_min_train_fraction", 0.40)),
+        )

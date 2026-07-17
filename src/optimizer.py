@@ -13,7 +13,7 @@ from .backtest import Backtester
 from .persistence import StateStore
 from .risk import CostModel
 from .strategy import StrategyParams
-from .validator import StrategyValidator, ValidationResult, ValidatorConfig
+from .validator import StrategyValidator, ValidationResult
 
 logger = logging.getLogger(__name__)
 
@@ -138,16 +138,7 @@ class ParameterOptimizer:
     ) -> "ParameterOptimizer":
         vcfg = cfg.get("validator", {})
         ocfg = cfg.get("optimizer", {})
-        validator = StrategyValidator(
-            ValidatorConfig(
-                max_drawdown=float(vcfg.get("max_drawdown", 0.10)),
-                sharpe_min=float(vcfg.get("sharpe_min", 1.5)),
-                sharpe_max=float(vcfg.get("sharpe_max", 3.0)),
-                p_value_max=float(vcfg.get("p_value_max", 0.05)),
-                oos_degradation_max=float(vcfg.get("oos_degradation_max", 0.30)),
-                is_fraction=float(vcfg.get("is_fraction", 0.70)),
-            )
-        )
+        validator = StrategyValidator(StrategyValidator.config_from_dict(vcfg))
         bt = Backtester.from_app_config(cfg, cost_model=cost_model)
         opt_cfg = OptimizerConfig(
             long_windows=list(ocfg.get("long_windows", OptimizerConfig().long_windows)),
