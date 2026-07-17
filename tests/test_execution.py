@@ -92,6 +92,31 @@ def test_matching_pending_awaits_fill_without_replacing(monkeypatch):
     assert sent == []
 
 
+def test_partial_fill_plus_remainder_pending_awaits_fill(monkeypatch):
+    """0.4 filled + 0.6 same-side pending must not be flattened and re-ordered."""
+    sent = []
+    pending = SimpleNamespace(
+        ticket=9,
+        magic=260717,
+        type=mt5.ORDER_TYPE_BUY_LIMIT,
+        volume_current=0.6,
+    )
+    monkeypatch.setattr(
+        mt5,
+        "positions_get",
+        lambda **kwargs: [_position(Signal.LONG, volume=0.4, ticket=77)],
+    )
+    monkeypatch.setattr(mt5, "orders_get", lambda **kwargs: [pending])
+    monkeypatch.setattr(mt5, "order_send", lambda request: sent.append(request))
+
+    executor = OrderExecutor(Connection(), execute=True, account_type="demo")
+    result = executor.reconcile_target(symbol="#US30", side=Signal.LONG, volume=1.0)
+
+    assert result.ok is True
+    assert result.action == "await_fill"
+    assert sent == []
+
+
 def test_reversal_closes_exact_ticket_before_new_entry(monkeypatch):
     sent = []
     monkeypatch.setattr(

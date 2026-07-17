@@ -439,12 +439,10 @@ class OrderExecutor:
     ) -> ReconcileResult:
         """Move managed positions toward one desired side/volume without stacking.
 
-        Reversals and resizes use close-then-open. Matching pending limit
-        orders are left alone (`await_fill`) so unfilled entries are not
-        cancelled and re-placed every bar. MT5 query failures (`None`) abort
-        all open / reverse / resize / flatten-complete paths. Pending cancel
-        must clear to zero (re-checked via ``orders_get``) before new entries
-        or flatten-success. Partial-fill retries remain a later MT5 step.
+        Reversals and resizes use close-then-open. Target satisfaction is
+        ``filled volume + same-side pending remainder`` (RETURN partial fills).
+        Matching working exposure uses ``await_fill`` and must not cancel the
+        residual pending. MT5 query failures abort trading paths.
         """
         positions = self.managed_positions(symbol, magic=magic)
         pending = self.managed_pending(symbol, magic=magic)
@@ -510,41 +508,44 @@ class OrderExecutor:
                 orders=closes,
             )
 
-        matches = (
+        # Fully filled to target — cancel any leftover working orders.
+        fully_filled = (
             len(current_sides) == 1
             and side in current_sides
             and abs(current_volume - float(volume)) <= tolerance
         )
-        if matches:
-            # Position already filled — drop any leftover working orders.
+        if fully_filled:
             cancel_err = self._require_pending_cleared(symbol, magic=magic)
             if cancel_err is not None:
                 return cancel_err
             return ReconcileResult(ok=True, action="hold", message="target already satisfied")
 
-        # Flat (or wrong size) but a matching limit is already working → wait.
-        if not positions and pending:
-            pending_sides = {self._pending_side(o) for o in pending}
-            pending_sides.discard(None)
-            pending_volume = sum(self._pending_volume(o) for o in pending)
-            pending_matches = (
-                len(pending_sides) == 1
-                and side in pending_sides
-                and abs(pending_volume - float(volume)) <= tolerance
+        # RETURN partial fill: position + same-side pending remainder == target.
+        await_fill = self._working_exposure_matches_target(
+            side=side,
+            target_volume=float(volume),
+            positions=positions,
+            pending=pending,
+            tolerance=tolerance,
+        )
+        if await_fill:
+            logger.info(
+                "Awaiting fill symbol=%s side=%s target=%s filled=%s pending=%s",
+                symbol,
+                side.name,
+                volume,
+                current_volume if side in current_sides else 0.0,
+                sum(
+                    self._pending_volume(o)
+                    for o in pending
+                    if self._pending_side(o) == side
+                ),
             )
-            if pending_matches:
-                logger.info(
-                    "Awaiting fill symbol=%s side=%s volume=%s pending=%s",
-                    symbol,
-                    side.name,
-                    volume,
-                    len(pending),
-                )
-                return ReconcileResult(
-                    ok=True,
-                    action="await_fill",
-                    message="matching pending limit already working",
-                )
+            return ReconcileResult(
+                ok=True,
+                action="await_fill",
+                message="working exposure matches target (filled + same-side pending)",
+            )
 
         cancel_err = self._require_pending_cleared(symbol, magic=magic)
         if cancel_err is not None:
@@ -601,6 +602,41 @@ class OrderExecutor:
             dry_run=entry.dry_run or any(r.dry_run for r in closes),
             orders=closes + [entry],
         )
+
+    def _working_exposure_matches_target(
+        self,
+        *,
+        side: Signal,
+        target_volume: float,
+        positions: list[Any],
+        pending: list[Any],
+        tolerance: float,
+    ) -> bool:
+        """True when filled + same-side pending remainder equals the target."""
+        if target_volume <= 0:
+            return False
+
+        position_sides = {
+            Signal.LONG if p.type == mt5.POSITION_TYPE_BUY else Signal.SHORT for p in positions
+        }
+        if len(position_sides) > 1:
+            return False
+        if position_sides and side not in position_sides:
+            return False
+
+        pending_sides = {self._pending_side(o) for o in pending}
+        pending_sides.discard(None)
+        if not pending_sides and not positions:
+            return False
+        if any(s != side for s in pending_sides):
+            return False
+
+        filled = sum(float(p.volume) for p in positions) if side in position_sides else 0.0
+        pending_vol = sum(
+            self._pending_volume(o) for o in pending if self._pending_side(o) == side
+        )
+        working = filled + pending_vol
+        return working > 0 and abs(working - target_volume) <= tolerance
 
     def close_position_limit(self, symbol: str, magic: int = 260717) -> Optional[OrderResult]:
         """Backward-compatible wrapper; now closes an exact position at market."""
