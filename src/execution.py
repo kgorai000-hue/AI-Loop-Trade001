@@ -308,7 +308,7 @@ class OrderExecutor:
                 "symbol": symbol,
             }
             result = mt5.order_send(request)
-            if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+            if result and self._retcode_ok(result.retcode):
                 cancelled.append(ticket)
             else:
                 failed.append(ticket)
@@ -642,13 +642,30 @@ class OrderExecutor:
         return failures[-1] if failures else results[-1]
 
     @staticmethod
+    def _success_retcodes() -> set[int]:
+        """MT5 retcodes that mean the request was accepted / executed."""
+        codes = {
+            int(mt5.TRADE_RETCODE_DONE),
+            int(getattr(mt5, "TRADE_RETCODE_PLACED", 10008)),
+            int(getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", 10010)),
+        }
+        return codes
+
+    @classmethod
+    def _retcode_ok(cls, retcode: Any) -> bool:
+        try:
+            return int(retcode) in cls._success_retcodes()
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
     def _send(request: dict[str, Any], operation: str) -> OrderResult:
         result = mt5.order_send(request)
         if result is None:
             err = mt5.last_error()
             logger.error("%s order_send returned None: %s", operation, err)
             return OrderResult(ok=False, message=str(err), request=request)
-        ok = result.retcode == mt5.TRADE_RETCODE_DONE
+        ok = OrderExecutor._retcode_ok(result.retcode)
         message = getattr(result, "comment", "") or str(result.retcode)
         if not ok:
             logger.warning("%s rejected retcode=%s comment=%s", operation, result.retcode, message)

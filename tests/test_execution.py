@@ -170,6 +170,67 @@ def test_pending_ignores_symbol_ioc_filling_flag():
     assert OrderExecutor._deal_filling_mode(info) == mt5.ORDER_FILLING_IOC
 
 
+def test_send_treats_placed_as_success(monkeypatch):
+    monkeypatch.setattr(
+        mt5,
+        "order_send",
+        lambda request: SimpleNamespace(
+            retcode=mt5.TRADE_RETCODE_PLACED,
+            order=55,
+            deal=0,
+            comment="placed",
+        ),
+    )
+    result = OrderExecutor._send(
+        {"action": mt5.TRADE_ACTION_PENDING, "symbol": "#US30"},
+        "order",
+    )
+    assert result.ok is True
+    assert result.retcode == mt5.TRADE_RETCODE_PLACED
+    assert result.order == 55
+
+
+def test_send_treats_done_partial_as_success(monkeypatch):
+    monkeypatch.setattr(
+        mt5,
+        "order_send",
+        lambda request: SimpleNamespace(
+            retcode=mt5.TRADE_RETCODE_DONE_PARTIAL,
+            order=1,
+            deal=2,
+            comment="partial",
+        ),
+    )
+    result = OrderExecutor._send({"action": mt5.TRADE_ACTION_DEAL}, "close")
+    assert result.ok is True
+    assert result.retcode == mt5.TRADE_RETCODE_DONE_PARTIAL
+
+
+def test_place_limit_ok_when_retcode_placed(monkeypatch):
+    monkeypatch.setattr(mt5, "positions_get", lambda **kwargs: [])
+    monkeypatch.setattr(mt5, "orders_get", lambda **kwargs: [])
+    monkeypatch.setattr(
+        mt5,
+        "symbol_info_tick",
+        lambda symbol: SimpleNamespace(bid=40000.0, ask=40001.0),
+    )
+    monkeypatch.setattr(
+        mt5,
+        "order_send",
+        lambda request: SimpleNamespace(
+            retcode=mt5.TRADE_RETCODE_PLACED,
+            order=99,
+            deal=0,
+            comment="Request placed",
+        ),
+    )
+    executor = OrderExecutor(Connection(), execute=True, account_type="demo")
+    result = executor.reconcile_target(symbol="#US30", side=Signal.LONG, volume=1.0, sl=39500.0)
+    assert result.ok is True
+    assert result.action == "open"
+    assert result.orders[-1].retcode == mt5.TRADE_RETCODE_PLACED
+
+
 def test_positions_get_none_does_not_open_as_flat(monkeypatch):
     sent = []
     monkeypatch.setattr(mt5, "positions_get", lambda **kwargs: None)

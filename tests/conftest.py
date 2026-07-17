@@ -30,7 +30,9 @@ for name, value in {
     "ORDER_FILLING_FOK": 30,
     "ORDER_FILLING_IOC": 31,
     "ORDER_FILLING_RETURN": 32,
+    "TRADE_RETCODE_PLACED": 10008,
     "TRADE_RETCODE_DONE": 10009,
+    "TRADE_RETCODE_DONE_PARTIAL": 10010,
 }.items():
     setattr(mt5, name, value)
 
