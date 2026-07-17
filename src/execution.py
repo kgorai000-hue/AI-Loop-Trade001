@@ -94,21 +94,55 @@ class OrderExecutor:
                 return False, "MT5 account is REAL but config forbids live"
         return True, "ok"
 
-    def managed_positions(self, symbol: str, magic: int = 260717) -> list[Any]:
+    def _positions_get(self, symbol: str) -> Optional[list[Any]]:
+        """MT5 positions query: None = error, [] = success/empty, else rows."""
         if not self.connection.ensure():
-            return []
-        positions = mt5.positions_get(symbol=symbol) or []
+            logger.error("positions_get skipped: MT5 not connected symbol=%s", symbol)
+            return None
+        raw = mt5.positions_get(symbol=symbol)
+        if raw is None:
+            err = mt5.last_error()
+            logger.error("positions_get failed symbol=%s: %s", symbol, err)
+            return None
+        return list(raw)
+
+    def _orders_get(self, symbol: str) -> Optional[list[Any]]:
+        """MT5 orders query: None = error, [] = success/empty, else rows."""
+        if not self.connection.ensure():
+            logger.error("orders_get skipped: MT5 not connected symbol=%s", symbol)
+            return None
+        raw = mt5.orders_get(symbol=symbol)
+        if raw is None:
+            err = mt5.last_error()
+            logger.error("orders_get failed symbol=%s: %s", symbol, err)
+            return None
+        return list(raw)
+
+    def managed_positions(self, symbol: str, magic: int = 260717) -> Optional[list[Any]]:
+        """Return managed positions, or None when the MT5 query failed."""
+        positions = self._positions_get(symbol)
+        if positions is None:
+            return None
         if magic == 0:
-            return list(positions)
+            return positions
         return [p for p in positions if int(getattr(p, "magic", 0) or 0) == magic]
 
-    def managed_pending(self, symbol: str, magic: int = 260717) -> list[Any]:
-        if not self.connection.ensure():
-            return []
-        orders = mt5.orders_get(symbol=symbol) or []
+    def managed_pending(self, symbol: str, magic: int = 260717) -> Optional[list[Any]]:
+        """Return managed pending orders, or None when the MT5 query failed."""
+        orders = self._orders_get(symbol)
+        if orders is None:
+            return None
         if magic == 0:
-            return list(orders)
+            return orders
         return [o for o in orders if int(getattr(o, "magic", 0) or 0) == magic]
+
+    @staticmethod
+    def _fetch_failed(what: str, symbol: str) -> ReconcileResult:
+        return ReconcileResult(
+            ok=False,
+            action="fetch_failed",
+            message=f"{what} query failed for {symbol}; trading halted",
+        )
 
     @staticmethod
     def _pending_side(order: Any) -> Optional[Signal]:
@@ -190,15 +224,19 @@ class OrderExecutor:
             return OrderResult(ok=True, message=f"dry-run: {reason}", dry_run=True, request=request)
         return self._send(request, "order")
 
-    def cancel_pending(self, symbol: str, magic: int = 260717) -> int:
-        """Cancel pending orders only after the same account safety gate as entry."""
+    def cancel_pending(self, symbol: str, magic: int = 260717) -> Optional[int]:
+        """Cancel pending orders only after the same account safety gate as entry.
+
+        Returns cancelled count, 0 when intentionally skipped (dry-run / blocked),
+        or None when the orders query failed.
+        """
         allowed, reason = self.can_execute()
         if not allowed:
             logger.info("Pending cancel skipped (%s) symbol=%s magic=%s", reason, symbol, magic)
             return 0
-        if not self.connection.ensure():
-            return 0
-        orders = mt5.orders_get(symbol=symbol) or []
+        orders = self._orders_get(symbol)
+        if orders is None:
+            return None
         cancelled = 0
         for order in orders:
             if magic != 0 and int(getattr(order, "magic", 0) or 0) != magic:
@@ -244,8 +282,14 @@ class OrderExecutor:
             return OrderResult(ok=True, message=f"dry-run close: {reason}", dry_run=True, request=request)
         return self._send(request, "close")
 
-    def close_managed_positions(self, symbol: str, magic: int = 260717) -> list[OrderResult]:
-        return [self.close_position_market(p, magic=magic) for p in self.managed_positions(symbol, magic)]
+    def close_managed_positions(
+        self, symbol: str, magic: int = 260717
+    ) -> Optional[list[OrderResult]]:
+        """Close managed positions, or None when the position query failed."""
+        positions = self.managed_positions(symbol, magic)
+        if positions is None:
+            return None
+        return [self.close_position_market(p, magic=magic) for p in positions]
 
     def reconcile_target(
         self,
@@ -261,11 +305,17 @@ class OrderExecutor:
 
         Reversals and resizes use close-then-open. Matching pending limit
         orders are left alone (`await_fill`) so unfilled entries are not
-        cancelled and re-placed every bar. Partial-fill retries remain a
-        later MT5 integration step.
+        cancelled and re-placed every bar. MT5 query failures (`None`) abort
+        all open / reverse / resize / flatten-complete paths. Partial-fill
+        retries remain a later MT5 integration step.
         """
         positions = self.managed_positions(symbol, magic=magic)
         pending = self.managed_pending(symbol, magic=magic)
+        if positions is None:
+            return self._fetch_failed("positions", symbol)
+        if pending is None:
+            return self._fetch_failed("orders", symbol)
+
         current_sides = {
             Signal.LONG if p.type == mt5.POSITION_TYPE_BUY else Signal.SHORT for p in positions
         }
@@ -273,8 +323,12 @@ class OrderExecutor:
         tolerance = max(float(volume_step), 1e-9) / 2.0
 
         if side == Signal.FLAT or volume <= 0:
-            self.cancel_pending(symbol, magic=magic)
+            cancelled = self.cancel_pending(symbol, magic=magic)
+            if cancelled is None:
+                return self._fetch_failed("orders", symbol)
             closes = self.close_managed_positions(symbol, magic=magic)
+            if closes is None:
+                return self._fetch_failed("positions", symbol)
             return ReconcileResult(
                 ok=all(r.ok for r in closes),
                 action="flatten" if positions or pending else "hold_flat",
@@ -290,7 +344,9 @@ class OrderExecutor:
         )
         if matches:
             # Position already filled — drop any leftover working orders.
-            self.cancel_pending(symbol, magic=magic)
+            cancelled = self.cancel_pending(symbol, magic=magic)
+            if cancelled is None:
+                return self._fetch_failed("orders", symbol)
             return ReconcileResult(ok=True, action="hold", message="target already satisfied")
 
         # Flat (or wrong size) but a matching limit is already working → wait.
@@ -317,8 +373,12 @@ class OrderExecutor:
                     message="matching pending limit already working",
                 )
 
-        self.cancel_pending(symbol, magic=magic)
+        cancelled = self.cancel_pending(symbol, magic=magic)
+        if cancelled is None:
+            return self._fetch_failed("orders", symbol)
         closes = self.close_managed_positions(symbol, magic=magic)
+        if closes is None:
+            return self._fetch_failed("positions", symbol)
         if any(not r.ok for r in closes):
             return ReconcileResult(
                 ok=False,
@@ -355,14 +415,20 @@ class OrderExecutor:
     def close_position_limit(self, symbol: str, magic: int = 260717) -> Optional[OrderResult]:
         """Backward-compatible wrapper; now closes an exact position at market."""
         positions = self.managed_positions(symbol, magic=magic)
+        if positions is None:
+            return OrderResult(ok=False, message="positions_get failed; close aborted")
         if not positions:
             return OrderResult(ok=True, message="no position")
         return self.close_position_market(positions[0], magic=magic)
 
     def close_all(self, symbol: str, magic: int = 260717) -> OrderResult:
         """Kill-switch flatten for all positions on a symbol."""
-        self.cancel_pending(symbol, magic=0)
+        cancelled = self.cancel_pending(symbol, magic=0)
+        if cancelled is None:
+            return OrderResult(ok=False, message="orders_get failed; flatten aborted")
         positions = self.managed_positions(symbol, magic=0)
+        if positions is None:
+            return OrderResult(ok=False, message="positions_get failed; flatten aborted")
         if not positions:
             return OrderResult(ok=True, message="no position")
         results = [self.close_position_market(p, magic=magic) for p in positions]

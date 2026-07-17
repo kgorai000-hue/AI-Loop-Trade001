@@ -112,6 +112,9 @@ class SymbolTrader:
         if bar_time is None:
             return 0
         positions = self.executor.managed_positions(self.symbol, magic=self.MAGIC)
+        if positions is None:
+            logger.warning("%s: position age unknown (positions_get failed)", self.symbol)
+            return 0
         opened = [int(getattr(p, "time", 0) or 0) for p in positions]
         opened = [t for t in opened if t > 0]
         if not opened:
@@ -140,6 +143,13 @@ class SymbolTrader:
             peak_f = equity
 
         positions = self.executor.managed_positions(self.symbol, magic=self.MAGIC)
+        if positions is None:
+            logger.warning(
+                "%s: skipping position state sync (positions_get failed)", self.symbol
+            )
+            self.store.update_state(equity=equity, margin=margin, equity_peak=peak_f)
+            return
+
         if not positions:
             position_state = {"side": "flat", "lots": 0.0, "entry_time": None}
         else:
