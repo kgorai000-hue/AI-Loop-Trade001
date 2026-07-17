@@ -102,6 +102,44 @@ class OrderExecutor:
             return list(positions)
         return [p for p in positions if int(getattr(p, "magic", 0) or 0) == magic]
 
+    def managed_pending(self, symbol: str, magic: int = 260717) -> list[Any]:
+        if not self.connection.ensure():
+            return []
+        orders = mt5.orders_get(symbol=symbol) or []
+        if magic == 0:
+            return list(orders)
+        return [o for o in orders if int(getattr(o, "magic", 0) or 0) == magic]
+
+    @staticmethod
+    def _pending_side(order: Any) -> Optional[Signal]:
+        order_type = int(getattr(order, "type", -1))
+        buy_types = {
+            int(mt5.ORDER_TYPE_BUY_LIMIT),
+            int(getattr(mt5, "ORDER_TYPE_BUY_STOP", -1)),
+            int(getattr(mt5, "ORDER_TYPE_BUY", -1)),
+        }
+        sell_types = {
+            int(mt5.ORDER_TYPE_SELL_LIMIT),
+            int(getattr(mt5, "ORDER_TYPE_SELL_STOP", -1)),
+            int(getattr(mt5, "ORDER_TYPE_SELL", -1)),
+        }
+        if order_type in buy_types:
+            return Signal.LONG
+        if order_type in sell_types:
+            return Signal.SHORT
+        return None
+
+    @staticmethod
+    def _pending_volume(order: Any) -> float:
+        for attr in ("volume_current", "volume_initial", "volume"):
+            value = getattr(order, attr, None)
+            if value is not None:
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    continue
+        return 0.0
+
     def _limit_price(self, symbol: str, side: Signal) -> Optional[float]:
         tick = mt5.symbol_info_tick(symbol)
         info = self.connection.symbol_info(symbol)
@@ -221,11 +259,13 @@ class OrderExecutor:
     ) -> ReconcileResult:
         """Move managed positions toward one desired side/volume without stacking.
 
-        Reversals and resizes use close-then-open. This is conservative and
-        deterministic for the prototype; partial-fill retries remain a later
-        MT5 integration step.
+        Reversals and resizes use close-then-open. Matching pending limit
+        orders are left alone (`await_fill`) so unfilled entries are not
+        cancelled and re-placed every bar. Partial-fill retries remain a
+        later MT5 integration step.
         """
         positions = self.managed_positions(symbol, magic=magic)
+        pending = self.managed_pending(symbol, magic=magic)
         current_sides = {
             Signal.LONG if p.type == mt5.POSITION_TYPE_BUY else Signal.SHORT for p in positions
         }
@@ -237,7 +277,7 @@ class OrderExecutor:
             closes = self.close_managed_positions(symbol, magic=magic)
             return ReconcileResult(
                 ok=all(r.ok for r in closes),
-                action="flatten" if positions else "hold_flat",
+                action="flatten" if positions or pending else "hold_flat",
                 message="target flat",
                 dry_run=any(r.dry_run for r in closes),
                 orders=closes,
@@ -249,8 +289,33 @@ class OrderExecutor:
             and abs(current_volume - float(volume)) <= tolerance
         )
         if matches:
+            # Position already filled — drop any leftover working orders.
             self.cancel_pending(symbol, magic=magic)
             return ReconcileResult(ok=True, action="hold", message="target already satisfied")
+
+        # Flat (or wrong size) but a matching limit is already working → wait.
+        if not positions and pending:
+            pending_sides = {self._pending_side(o) for o in pending}
+            pending_sides.discard(None)
+            pending_volume = sum(self._pending_volume(o) for o in pending)
+            pending_matches = (
+                len(pending_sides) == 1
+                and side in pending_sides
+                and abs(pending_volume - float(volume)) <= tolerance
+            )
+            if pending_matches:
+                logger.info(
+                    "Awaiting fill symbol=%s side=%s volume=%s pending=%s",
+                    symbol,
+                    side.name,
+                    volume,
+                    len(pending),
+                )
+                return ReconcileResult(
+                    ok=True,
+                    action="await_fill",
+                    message="matching pending limit already working",
+                )
 
         self.cancel_pending(symbol, magic=magic)
         closes = self.close_managed_positions(symbol, magic=magic)
@@ -273,6 +338,12 @@ class OrderExecutor:
                 magic=magic,
             )
         )
+        if entry.ok:
+            entry.message = (
+                entry.message
+                if entry.dry_run
+                else f"limit entry submitted; awaiting fill ({entry.message})"
+            )
         return ReconcileResult(
             ok=entry.ok,
             action="open" if not positions else "reverse_or_resize",

@@ -67,6 +67,26 @@ def test_matching_target_does_not_stack(monkeypatch):
     assert sent == []
 
 
+def test_matching_pending_awaits_fill_without_replacing(monkeypatch):
+    sent = []
+    pending = SimpleNamespace(
+        ticket=9,
+        magic=260717,
+        type=mt5.ORDER_TYPE_BUY_LIMIT,
+        volume_current=1.0,
+    )
+    monkeypatch.setattr(mt5, "positions_get", lambda **kwargs: [])
+    monkeypatch.setattr(mt5, "orders_get", lambda **kwargs: [pending])
+    monkeypatch.setattr(mt5, "order_send", lambda request: sent.append(request))
+
+    executor = OrderExecutor(Connection(), execute=True, account_type="demo")
+    result = executor.reconcile_target(symbol="#US30", side=Signal.LONG, volume=1.0)
+
+    assert result.ok is True
+    assert result.action == "await_fill"
+    assert sent == []
+
+
 def test_reversal_closes_exact_ticket_before_new_entry(monkeypatch):
     sent = []
     monkeypatch.setattr(
@@ -101,3 +121,4 @@ def test_reversal_closes_exact_ticket_before_new_entry(monkeypatch):
     assert sent[0]["position"] == 77
     assert sent[1]["action"] == mt5.TRADE_ACTION_PENDING
     assert sent[1]["type"] == mt5.ORDER_TYPE_SELL_LIMIT
+    assert "awaiting fill" in result.message

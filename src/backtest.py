@@ -27,7 +27,8 @@ class Backtester:
     Simple bar-close backtester:
     - Signal decided on bar i close, position for bar i+1 return.
     - Flat when signal is 0 or after max_hold_bars.
-    - Round-trip cost applied when position changes.
+    - One-way cost charged on entry AND on exit (both hit bar_returns / equity).
+    - Per-trade PnL deducts a full round-trip cost.
     """
 
     def __init__(
@@ -80,11 +81,11 @@ class Backtester:
                     desired = 0
 
             if desired != position:
-                # Close existing
+                # Close existing — exit cost must hit the equity curve
                 if position != 0 and entry_i >= 0:
                     exit_price = closes[i]
-                    pnl = position * (exit_price / entry_price - 1.0) - cost_one
-                    # Approximate: entry already paid one-way; exit pays one-way
+                    bar_rets[i] -= cost_one
+                    pnl = position * (exit_price / entry_price - 1.0) - cost_rt
                     trade_pnls.append(pnl)
                     trades.append(
                         {
@@ -99,13 +100,12 @@ class Backtester:
                     entry_i = -1
                     hold = 0
 
-                # Open new
+                # Open new — entry cost hits equity curve
                 if desired != 0:
                     position = desired
                     entry_price = closes[i]
                     entry_i = i
                     hold = 0
-                    # Entry cost taken against next bar return stream
                     bar_rets[i] -= cost_one
                 else:
                     position = 0
@@ -113,10 +113,11 @@ class Backtester:
             # Mark-to-market for holding bar i → i+1
             bar_rets[i] += position * fwd[i]
 
-        # Force close at end
+        # Force close at end (exit cost on final bar)
         if position != 0 and entry_i >= 0:
             exit_price = closes[-1]
-            pnl = position * (exit_price / entry_price - 1.0) - cost_one
+            bar_rets[-1] -= cost_one
+            pnl = position * (exit_price / entry_price - 1.0) - cost_rt
             trade_pnls.append(pnl)
             trades.append(
                 {
@@ -141,8 +142,6 @@ class Backtester:
             trade_pnls=trade_pnls,
             periods_per_year=self.periods_per_year,
         )
-        # Attach cost awareness note via total_return already cost-adjusted
-        _ = cost_rt  # retained for clarity / future logging
 
         return BacktestResult(
             report=report,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import MetaTrader5 as mt5
 import pandas as pd
 
 from src.strategy import Regime, Signal, StrategyDecision, StrategyParams
@@ -109,7 +110,11 @@ def test_on_new_bar_uses_same_completed_bar_for_detection_and_decision():
 def test_max_hold_forces_flat_target():
     bar_time = pd.Timestamp("2026-01-01T02:00:00Z")
     position = SimpleNamespace(
-        time=int(pd.Timestamp("2026-01-01T01:00:00Z").timestamp())
+        type=mt5.POSITION_TYPE_BUY,
+        volume=1.0,
+        ticket=42,
+        magic=260717,
+        time=int(pd.Timestamp("2026-01-01T01:00:00Z").timestamp()),
     )
     frame = pd.DataFrame({"time": [bar_time], "close": [100.0]})
     trader, executor = _trader(frame, positions=[position])
@@ -126,3 +131,4 @@ def test_max_hold_forces_flat_target():
     assert result["forced_flat"] == "max_hold_bars"
     assert executor.targets[-1]["side"] == Signal.FLAT
     assert executor.targets[-1]["volume"] == 0.0
+    assert trader.store.state["equity"] == 1000.0
