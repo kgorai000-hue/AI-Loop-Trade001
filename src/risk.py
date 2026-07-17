@@ -133,6 +133,26 @@ class RiskManager:
     max_margin_fraction: float = 0.50
     recent_pnls: list[float] = field(default_factory=list)
 
+    @classmethod
+    def from_config(cls, cfg: Optional[dict] = None) -> "RiskManager":
+        cfg = cfg or {}
+        stop_points = cfg.get("stop_points")
+        return cls(
+            half_kelly=bool(cfg.get("half_kelly", True)),
+            default_win_rate=float(cfg.get("default_win_rate", 0.52)),
+            default_reward_risk=float(cfg.get("default_reward_risk", 1.5)),
+            max_fraction=float(cfg.get("max_fraction", 0.25)),
+            max_lots=float(cfg.get("max_lots", 5.0)),
+            min_lots=float(cfg.get("min_lots", 0.01)),
+            lookback_trades=int(cfg.get("lookback_trades", 50)),
+            min_cost_bps=float(cfg.get("min_cost_bps", 10)),
+            stop_pct=float(cfg.get("stop_pct", 0.005)),
+            stop_points=float(stop_points) if stop_points is not None else None,
+            gap_buffer_mult=float(cfg.get("gap_buffer_mult", 1.25)),
+            max_open_risk_fraction=float(cfg.get("max_open_risk_fraction", 0.25)),
+            max_margin_fraction=float(cfg.get("max_margin_fraction", 0.50)),
+        )
+
     def record_trade(self, pnl: float) -> None:
         self.recent_pnls.append(float(pnl))
         if len(self.recent_pnls) > self.lookback_trades * 2:

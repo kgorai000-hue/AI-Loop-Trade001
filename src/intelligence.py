@@ -10,7 +10,7 @@ from typing import Any, Optional
 import pandas as pd
 
 from .anthropic_client import AnthropicClient
-from .backtest import Backtester, FillModel
+from .backtest import Backtester
 from .checker import StrategyChecker
 from .maker import StrategyMaker
 from .optimizer import OptimizeOutcome, ParameterOptimizer
@@ -83,9 +83,9 @@ class IntelligenceLoop:
                 is_fraction=float(vcfg.get("is_fraction", 0.70)),
             )
         )
-        self.backtester = Backtester(
+        self.backtester = Backtester.from_app_config(
+            app_config,
             cost_model=self.cost_model,
-            fill_model=FillModel.from_config(app_config.get("backtest")),
         )
 
     def run(self, df: pd.DataFrame) -> IntelligenceOutcome:

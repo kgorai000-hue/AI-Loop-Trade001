@@ -53,6 +53,20 @@ backtest:
   limit_ttl_bars: 2             # cancel unfilled limits after N bars
   slippage_bps: 1.0             # adverse slippage on limit fill / market exit
   limit_offset_bps: 0.0         # place limit this far inside the signal close
+  account_sizing: true          # Kelly lots + account-currency DD (not ±1 unit)
+  initial_equity: 10000.0       # used when MT5 equity unavailable (optimizer/offline)
+  stop_out_level: 0.50          # equity/margin below this → force flatten
+  # Symbol contract defaults (override from MT5 live; tune for offline runs)
+  tick_size: 1.0
+  tick_value: 1.0
+  contract_size: 1.0
+  volume_step: 0.01
+  volume_min: 0.01
+  volume_max: 5.0
+  point: 1.0
+  digits: 1
+  leverage: 100.0
+  # margin_per_lot: 400.0      # optional fixed margin; else notional/leverage
 
 validator:
   lookback_months: 6

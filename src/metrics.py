@@ -132,9 +132,11 @@ def build_report(
     signals: Optional[pd.Series] = None,
     trade_pnls: Optional[list[float]] = None,
     periods_per_year: float = BARS_PER_YEAR_M30,
+    initial_equity: float = 1.0,
 ) -> PerformanceReport:
-    equity = equity_from_returns(bar_returns)
-    total_return = float(equity.iloc[-1] - 1.0) if len(equity) else 0.0
+    initial = float(initial_equity) if initial_equity and initial_equity > 0 else 1.0
+    equity = equity_from_returns(bar_returns, initial=initial)
+    total_return = float(equity.iloc[-1] / initial - 1.0) if len(equity) else 0.0
     sharpe = sharpe_ratio(bar_returns, periods_per_year=periods_per_year)
     dd = max_drawdown(equity)
     p = returns_pvalue(bar_returns)

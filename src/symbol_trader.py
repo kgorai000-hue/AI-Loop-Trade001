@@ -9,7 +9,7 @@ from typing import Any, Optional
 
 import pandas as pd
 
-from .backtest import Backtester, FillModel
+from .backtest import Backtester, SymbolSpec
 from .connection import MT5Connection
 from .data import DataFeed
 from .execution import OrderExecutor
@@ -365,9 +365,24 @@ class SymbolTrader:
         if df is None:
             return {"ok": False, "error": "no history"}
         cost = self.cost_model()
-        bt = Backtester(
+        symbol_spec = None
+        initial_equity = None
+        info = self.connection.symbol_info(self.symbol)
+        if info is not None:
+            symbol_spec = SymbolSpec.from_mt5_info(
+                info, margin_per_lot=self._margin_per_lot(Signal.LONG, float(getattr(info, "bid", 0) or 0) or 1.0)
+            )
+        account = self.connection.account_info()
+        if account is not None:
+            eq = float(getattr(account, "equity", 0) or 0)
+            if eq > 0:
+                initial_equity = eq
+        bt = Backtester.from_app_config(
+            self.app_config,
             cost_model=cost,
-            fill_model=FillModel.from_config(self.app_config.get("backtest")),
+            risk=self.risk,
+            symbol_spec=symbol_spec,
+            initial_equity=initial_equity,
         )
         from .validator import ValidatorConfig
 

@@ -9,7 +9,7 @@ from typing import Any, Optional
 
 import pandas as pd
 
-from .backtest import Backtester, FillModel
+from .backtest import Backtester
 from .persistence import StateStore
 from .risk import CostModel
 from .strategy import StrategyParams
@@ -148,11 +148,7 @@ class ParameterOptimizer:
                 is_fraction=float(vcfg.get("is_fraction", 0.70)),
             )
         )
-        bt = Backtester(
-            cost_model=cost_model
-            or CostModel(min_cost_bps=float(cfg.get("risk", {}).get("min_cost_bps", 10))),
-            fill_model=FillModel.from_config(cfg.get("backtest")),
-        )
+        bt = Backtester.from_app_config(cfg, cost_model=cost_model)
         opt_cfg = OptimizerConfig(
             long_windows=list(ocfg.get("long_windows", OptimizerConfig().long_windows)),
             short_windows=list(ocfg.get("short_windows", OptimizerConfig().short_windows)),

@@ -44,25 +44,7 @@ class LoopEngine:
             allow_live=bool(config.get("allow_live", False)),
         )
         risk_cfg = config.get("risk", {})
-        self.risk = RiskManager(
-            half_kelly=bool(risk_cfg.get("half_kelly", True)),
-            default_win_rate=float(risk_cfg.get("default_win_rate", 0.52)),
-            default_reward_risk=float(risk_cfg.get("default_reward_risk", 1.5)),
-            max_fraction=float(risk_cfg.get("max_fraction", 0.25)),
-            max_lots=float(risk_cfg.get("max_lots", 5.0)),
-            min_lots=float(risk_cfg.get("min_lots", 0.01)),
-            lookback_trades=int(risk_cfg.get("lookback_trades", 50)),
-            min_cost_bps=float(risk_cfg.get("min_cost_bps", 10)),
-            stop_pct=float(risk_cfg.get("stop_pct", 0.005)),
-            stop_points=(
-                float(risk_cfg["stop_points"])
-                if risk_cfg.get("stop_points") is not None
-                else None
-            ),
-            gap_buffer_mult=float(risk_cfg.get("gap_buffer_mult", 1.25)),
-            max_open_risk_fraction=float(risk_cfg.get("max_open_risk_fraction", 0.25)),
-            max_margin_fraction=float(risk_cfg.get("max_margin_fraction", 0.50)),
-        )
+        self.risk = RiskManager.from_config(risk_cfg)
         loop_cfg = config.get("loop", {})
         self.poll_seconds = int(loop_cfg.get("poll_seconds", 30))
         self.review_weekday = int(loop_cfg.get("review_weekday", 5))
