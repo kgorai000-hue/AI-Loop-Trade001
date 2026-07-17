@@ -80,6 +80,80 @@ def returns_pvalue(returns: pd.Series) -> float:
     return float(p)
 
 
+def block_bootstrap_mean_pvalue(
+    returns: pd.Series,
+    *,
+    block_size: int = 48,
+    n_boot: int = 400,
+    seed: int = 42,
+) -> float:
+    """Two-sided block-bootstrap p-value for H0: E[r] = 0.
+
+    Returns are recentered under H0; contiguous blocks are resampled to preserve
+    serial dependence. Falls back to a t-test when the series is too short.
+    """
+    r = returns.fillna(0.0).to_numpy(dtype=float)
+    n = len(r)
+    block = max(1, int(block_size))
+    boots = max(0, int(n_boot))
+    if boots <= 0 or n < max(20, block * 2):
+        return returns_pvalue(returns)
+    obs = float(r.mean())
+    if abs(obs) < 1e-18 or np.allclose(r, 0.0):
+        return 1.0
+    centered = r - obs
+    rng = np.random.default_rng(int(seed))
+    n_blocks = int(np.ceil(n / block))
+    extremes = 0
+    for _ in range(boots):
+        starts = rng.integers(0, n, size=n_blocks)
+        pieces = [centered[s : s + block] for s in starts]
+        sample = np.concatenate(pieces)[:n]
+        if abs(float(sample.mean())) >= abs(obs):
+            extremes += 1
+    return float((extremes + 1) / (boots + 1))
+
+
+def adjust_alpha(alpha: float, n_tests: int, method: str = "bonferroni") -> float:
+    """Family-wise / FDR-style alpha for a single-test gate."""
+    a = max(0.0, float(alpha))
+    m = max(1, int(n_tests))
+    method = (method or "none").lower()
+    if method in ("none", "off", ""):
+        return a
+    if method in ("bonferroni", "holm"):
+        # Per-comparison threshold under Bonferroni (conservative; Holm needs all p's).
+        return a / m
+    if method in ("fdr", "fdr_bh", "bh"):
+        # Conservative single-test stand-in when only one p is available.
+        return a * (1.0 / m)
+    return a
+
+
+def regime_trade_counts(
+    trades: list[dict],
+    regimes: Optional[pd.Series],
+) -> dict[str, int]:
+    """Count closed trades by regime at entry bar."""
+    counts: dict[str, int] = {}
+    if regimes is None or regimes.empty:
+        return counts
+    reg_vals = regimes.to_numpy()
+    for trade in trades:
+        idx = trade.get("entry_i")
+        if idx is None:
+            continue
+        try:
+            i = int(idx)
+        except (TypeError, ValueError):
+            continue
+        if i < 0 or i >= len(reg_vals):
+            continue
+        key = str(reg_vals[i])
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
 def information_coefficient(signals: pd.Series, forward_returns: pd.Series) -> float:
     """Spearman rank IC between signal and raw next-bar market return.
 

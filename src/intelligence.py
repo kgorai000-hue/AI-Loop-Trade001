@@ -228,7 +228,12 @@ class IntelligenceLoop:
         else:
             holdout_bt = self._run_on_segment(search_df, holdout, best_params)
             holdout_val = self.validator.validate_reports(
-                holdout_bt, holdout_bt, holdout_bt, 0.0
+                holdout_bt,
+                holdout_bt,
+                holdout_bt,
+                0.0,
+                check_oos_trades=False,
+                n_tests=1,
             )
             accepted = bool(holdout_val.accepted)
 
@@ -285,7 +290,18 @@ class IntelligenceLoop:
             return full
         rets = full.bar_returns.iloc[warm:].reset_index(drop=True)
         sigs = full.signals.iloc[warm:].reset_index(drop=True)
-        trades = [t for t in full.trades if t["entry_i"] >= warm]
+        trades = []
+        for t in full.trades:
+            if t["entry_i"] < warm:
+                continue
+            nt = dict(t)
+            nt["entry_i"] = int(t["entry_i"]) - warm
+            if t.get("exit_i") is not None:
+                nt["exit_i"] = int(t["exit_i"]) - warm
+            trades.append(nt)
+        regimes = None
+        if full.regimes is not None:
+            regimes = full.regimes.iloc[warm:].reset_index(drop=True)
         seg = combined.iloc[warm:].reset_index(drop=True)
         mkt_fwd = market_forward_returns(seg["close"])
         report = build_report(
@@ -312,6 +328,7 @@ class IntelligenceLoop:
             fill_model=full.fill_model,
             account_config=full.account_config,
             final_equity=full.final_equity,
+            regimes=regimes,
         )
 
     def _run_llm(self, df: pd.DataFrame) -> IntelligenceOutcome:
@@ -356,10 +373,14 @@ class IntelligenceLoop:
         best_val: Optional[ValidationResult] = None
         accepted_count = 0
 
+        n_tests = max(maker_n, len(approved), 1)
         for rev in approved:
             try:
                 val, full = self.validator.validate(
-                    df, rev.params, backtester=self.backtester
+                    df,
+                    rev.params,
+                    backtester=self.backtester,
+                    n_tests=n_tests,
                 )
             except Exception as exc:
                 logger.warning("Validator failed for %s: %s", rev.params.as_dict(), exc)
@@ -378,7 +399,10 @@ class IntelligenceLoop:
                 "oos_degradation": val.oos_degradation,
                 "overfitting": val.overfitting,
                 "reasons": val.reasons,
-                "n_trades": full.report.n_trades,
+                "n_trades": val.n_trades,
+                "oos_n_trades": val.oos_n_trades,
+                "regime_trades": val.regime_trades,
+                "p_value_threshold": val.p_value_threshold,
                 "source": "llm",
                 "checker_reason": rev.reason,
             }

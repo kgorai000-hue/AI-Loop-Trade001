@@ -146,6 +146,7 @@ class BacktestResult:
     fill_model: Optional[FillModel] = None
     account_config: Optional[AccountConfig] = None
     final_equity: Optional[float] = None
+    regimes: Optional[pd.Series] = None
 
 
 class Backtester:
@@ -740,6 +741,10 @@ class Backtester:
         bar_series = pd.Series(bar_rets, index=annotated.index)
         bar_series.iloc[:warmup] = 0.0
         sig_series = pd.Series(signals, index=annotated.index)
+        if "regime" in annotated.columns:
+            regime_series = annotated["regime"].copy()
+        else:
+            regime_series = pd.Series(["unknown"] * len(annotated), index=annotated.index)
         mkt_fwd = market_forward_returns(annotated["close"])
         report_initial = float(self.account.initial_equity) if self.account.enabled else 1.0
         report = build_report(
@@ -762,6 +767,7 @@ class Backtester:
             fill_model=self.fill_model,
             account_config=self.account,
             final_equity=equity,
+            regimes=regime_series,
         )
 
     def run_is_oos(
@@ -785,8 +791,19 @@ class Backtester:
             oos_full = self.run(oos_with_warm, params=params)
             oos_rets = oos_full.bar_returns.iloc[warmup:].reset_index(drop=True)
             oos_sigs = oos_full.signals.iloc[warmup:].reset_index(drop=True)
-            oos_trades = [t for t in oos_full.trades if t["entry_i"] >= warmup]
+            oos_trades = []
+            for t in oos_full.trades:
+                if t["entry_i"] < warmup:
+                    continue
+                nt = dict(t)
+                nt["entry_i"] = int(t["entry_i"]) - warmup
+                if t.get("exit_i") is not None:
+                    nt["exit_i"] = int(t["exit_i"]) - warmup
+                oos_trades.append(nt)
             oos_mkt = market_forward_returns(oos_df["close"]).reset_index(drop=True)
+            oos_regimes = None
+            if oos_full.regimes is not None:
+                oos_regimes = oos_full.regimes.iloc[warmup:].reset_index(drop=True)
             oos_report = build_report(
                 oos_rets,
                 signals=oos_sigs,
@@ -807,6 +824,7 @@ class Backtester:
                 fill_model=self.fill_model,
                 account_config=self.account,
                 final_equity=oos_full.final_equity,
+                regimes=oos_regimes,
             )
         else:
             oos_result = self.run(oos_df, params=params)

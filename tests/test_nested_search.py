@@ -93,6 +93,11 @@ def test_run_nested_holdout_not_used_for_fold_selection(monkeypatch):
             holdout_fraction=0.2,
             wf_folds=2,
             wf_min_train_fraction=0.4,
+            min_trades=1,
+            min_oos_trades=1,
+            min_regime_trades=0,
+            block_bootstrap_reps=0,
+            multiple_testing="none",
         )
     )
 
@@ -133,6 +138,11 @@ def test_validate_can_skip_oos_gate_for_holdout():
             p_value_max=1.0,
             oos_degradation_max=0.0,  # would reject any positive deg if applied
             is_fraction=0.7,
+            min_trades=40,
+            min_oos_trades=1,
+            min_regime_trades=0,
+            block_bootstrap_reps=0,
+            multiple_testing="none",
         )
     )
     bt = Backtester(

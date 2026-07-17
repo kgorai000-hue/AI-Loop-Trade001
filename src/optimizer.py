@@ -77,11 +77,14 @@ class ParameterOptimizer:
         accepted_count = 0
 
         candidates = self._candidate_params()
-        logger.info("Optimizer evaluating %d candidates", len(candidates))
+        n_tests = max(len(candidates), 1)
+        logger.info("Optimizer evaluating %d candidates (n_tests=%d)", n_tests, n_tests)
 
         for params in candidates:
             try:
-                val, full = self.validator.validate(df, params, backtester=self.backtester)
+                val, full = self.validator.validate(
+                    df, params, backtester=self.backtester, n_tests=n_tests
+                )
             except Exception as exc:
                 logger.warning("Candidate %s failed: %s", params.as_dict(), exc)
                 continue
@@ -96,7 +99,10 @@ class ParameterOptimizer:
                 "oos_degradation": val.oos_degradation,
                 "overfitting": val.overfitting,
                 "reasons": val.reasons,
-                "n_trades": full.report.n_trades,
+                "n_trades": val.n_trades,
+                "oos_n_trades": val.oos_n_trades,
+                "regime_trades": val.regime_trades,
+                "p_value_threshold": val.p_value_threshold,
             }
             rankings.append(row)
 

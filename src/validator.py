@@ -5,9 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .backtest import BacktestResult, Backtester
-from .strategy import StrategyParams
 import pandas as pd
+
+from .backtest import BacktestResult, Backtester
+from .metrics import (
+    adjust_alpha,
+    block_bootstrap_mean_pvalue,
+    regime_trade_counts,
+)
+from .strategy import Regime, StrategyParams
 
 
 @dataclass
@@ -22,6 +28,14 @@ class ValidatorConfig:
     holdout_fraction: float = 0.15
     wf_folds: int = 3
     wf_min_train_fraction: float = 0.40
+    # Sample-size / statistical rigor
+    min_trades: int = 40
+    min_oos_trades: int = 15
+    min_regime_trades: int = 10
+    block_bootstrap_reps: int = 400
+    block_bootstrap_block_bars: int = 48
+    multiple_testing: str = "bonferroni"  # none | bonferroni | fdr_bh
+    n_tests: int = 0  # 0 → use per-call n_tests or 1
 
 
 @dataclass
@@ -37,6 +51,10 @@ class ValidationResult:
     is_sharpe: float = 0.0
     oos_sharpe: float = 0.0
     overfitting: bool = False
+    n_trades: int = 0
+    oos_n_trades: int = 0
+    regime_trades: dict = field(default_factory=dict)
+    p_value_threshold: float = 0.05
 
     def as_dict(self) -> dict:
         return {
@@ -51,16 +69,20 @@ class ValidationResult:
             "is_sharpe": self.is_sharpe,
             "oos_sharpe": self.oos_sharpe,
             "overfitting": self.overfitting,
+            "n_trades": self.n_trades,
+            "oos_n_trades": self.oos_n_trades,
+            "regime_trades": dict(self.regime_trades),
+            "p_value_threshold": self.p_value_threshold,
         }
 
 
 class StrategyValidator:
     """
     Reject variants that fail any gate:
-    - max DD < 10%
-    - 1.5 <= Sharpe <= 3.0 (Sharpe > 3.0 → overfitting flag + reject)
-    - p-value < 0.05
-    - OOS Sharpe degradation <= 30%
+    - max DD / Sharpe band / OOS degradation
+    - block-bootstrap p-value (multiple-testing adjusted)
+    - full-sample and OOS trade counts
+    - per-regime trade counts (trend / mean_reversion)
     """
 
     def __init__(self, config: Optional[ValidatorConfig] = None) -> None:
@@ -72,6 +94,9 @@ class StrategyValidator:
         is_result: BacktestResult,
         oos_result: BacktestResult,
         oos_deg: float,
+        *,
+        check_oos_trades: bool = True,
+        n_tests: Optional[int] = None,
     ) -> ValidationResult:
         cfg = self.config
         reasons: list[str] = []
@@ -80,8 +105,22 @@ class StrategyValidator:
 
         sharpe = full.report.sharpe
         dd = full.report.max_drawdown
-        p = full.report.p_value
         ic = full.report.ic
+        n_trades = int(full.report.n_trades)
+        oos_n_trades = int(oos_result.report.n_trades)
+
+        if cfg.block_bootstrap_reps > 0:
+            p = block_bootstrap_mean_pvalue(
+                full.bar_returns,
+                block_size=cfg.block_bootstrap_block_bars,
+                n_boot=cfg.block_bootstrap_reps,
+            )
+            flags.append("p_value_block_bootstrap")
+        else:
+            p = full.report.p_value
+
+        tests = int(n_tests) if n_tests is not None and n_tests > 0 else int(cfg.n_tests or 1)
+        p_threshold = adjust_alpha(cfg.p_value_max, tests, cfg.multiple_testing)
 
         if dd >= cfg.max_drawdown:
             reasons.append(f"max_drawdown {dd:.4f} >= {cfg.max_drawdown}")
@@ -93,16 +132,50 @@ class StrategyValidator:
         elif sharpe < cfg.sharpe_min:
             reasons.append(f"sharpe {sharpe:.4f} < {cfg.sharpe_min}")
 
-        if p >= cfg.p_value_max:
-            reasons.append(f"p_value {p:.4f} >= {cfg.p_value_max}")
+        if p >= p_threshold:
+            reasons.append(
+                f"p_value {p:.4f} >= {p_threshold:.6f} "
+                f"(alpha={cfg.p_value_max}, n_tests={tests}, method={cfg.multiple_testing})"
+            )
 
         if oos_deg > cfg.oos_degradation_max:
             reasons.append(
                 f"oos_degradation {oos_deg:.4f} > {cfg.oos_degradation_max}"
             )
 
-        if full.report.n_trades < 5:
-            reasons.append(f"insufficient_trades {full.report.n_trades}")
+        if check_oos_trades:
+            if n_trades < cfg.min_trades:
+                reasons.append(f"insufficient_trades {n_trades} < {cfg.min_trades}")
+            if oos_n_trades < cfg.min_oos_trades:
+                reasons.append(
+                    f"insufficient_oos_trades {oos_n_trades} < {cfg.min_oos_trades}"
+                )
+        elif n_trades < cfg.min_oos_trades:
+            # Holdout / single-window gate: OOS-level sample size only.
+            reasons.append(
+                f"insufficient_trades {n_trades} < {cfg.min_oos_trades}"
+            )
+
+        regime_counts = regime_trade_counts(full.trades, full.regimes)
+        if check_oos_trades and cfg.min_regime_trades > 0:
+            active_regimes = {
+                str(r)
+                for r in (
+                    full.regimes.dropna().unique()
+                    if full.regimes is not None
+                    else []
+                )
+                if str(r) in (Regime.TREND, Regime.MEAN_REVERSION)
+            }
+            for reg in (Regime.TREND, Regime.MEAN_REVERSION):
+                if reg not in active_regimes and regime_counts.get(reg, 0) == 0:
+                    continue
+                count = int(regime_counts.get(reg, 0))
+                if count < cfg.min_regime_trades:
+                    reasons.append(
+                        f"insufficient_regime_trades {reg}={count} "
+                        f"< {cfg.min_regime_trades}"
+                    )
 
         accepted = len(reasons) == 0
         return ValidationResult(
@@ -117,6 +190,10 @@ class StrategyValidator:
             is_sharpe=is_result.report.sharpe,
             oos_sharpe=oos_result.report.sharpe,
             overfitting=overfitting,
+            n_trades=n_trades,
+            oos_n_trades=oos_n_trades,
+            regime_trades=regime_counts,
+            p_value_threshold=p_threshold,
         )
 
     def validate(
@@ -126,6 +203,7 @@ class StrategyValidator:
         backtester: Optional[Backtester] = None,
         *,
         apply_oos_gate: bool = True,
+        n_tests: Optional[int] = None,
     ) -> tuple[ValidationResult, BacktestResult]:
         """Validate params on ``df``.
 
@@ -141,7 +219,14 @@ class StrategyValidator:
             )
         else:
             is_r, oos_r, deg = full, full, 0.0
-        result = self.validate_reports(full, is_r, oos_r, deg)
+        result = self.validate_reports(
+            full,
+            is_r,
+            oos_r,
+            deg,
+            check_oos_trades=apply_oos_gate,
+            n_tests=n_tests,
+        )
         return result, full
 
     @classmethod
@@ -157,4 +242,11 @@ class StrategyValidator:
             holdout_fraction=float(vcfg.get("holdout_fraction", 0.15)),
             wf_folds=int(vcfg.get("wf_folds", 3)),
             wf_min_train_fraction=float(vcfg.get("wf_min_train_fraction", 0.40)),
+            min_trades=int(vcfg.get("min_trades", 40)),
+            min_oos_trades=int(vcfg.get("min_oos_trades", 15)),
+            min_regime_trades=int(vcfg.get("min_regime_trades", 10)),
+            block_bootstrap_reps=int(vcfg.get("block_bootstrap_reps", 400)),
+            block_bootstrap_block_bars=int(vcfg.get("block_bootstrap_block_bars", 48)),
+            multiple_testing=str(vcfg.get("multiple_testing", "bonferroni")),
+            n_tests=int(vcfg.get("n_tests", 0)),
         )
