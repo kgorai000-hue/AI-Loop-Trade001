@@ -1,15 +1,18 @@
-"""Per-symbol orchestration: data → signal → risk → execution → persistence."""
+"""Per-symbol orchestration: closed bars → target position → execution."""
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Optional
+
+import pandas as pd
 
 from .backtest import Backtester
 from .connection import MT5Connection
 from .data import DataFeed
-from .execution import OrderExecutor, OrderRequest
+from .execution import OrderExecutor
 from .intelligence import IntelligenceLoop
 from .persistence import StateStore
 from .risk import CostModel, RiskManager
@@ -17,6 +20,16 @@ from .strategy import RegressionStrategy, Signal, StrategyDecision, StrategyPara
 from .validator import StrategyValidator
 
 logger = logging.getLogger(__name__)
+
+TIMEFRAME_MINUTES = {
+    "M1": 1,
+    "M5": 5,
+    "M15": 15,
+    "M30": 30,
+    "H1": 60,
+    "H4": 240,
+    "D1": 1440,
+}
 
 
 @dataclass
@@ -32,6 +45,8 @@ class SymbolConfig:
 
 class SymbolTrader:
     """End-to-end controller for a single tradable symbol."""
+
+    MAGIC = 260717
 
     def __init__(
         self,
@@ -50,7 +65,6 @@ class SymbolTrader:
         self.app_config = app_config
 
         params = self.store.get_params()
-        # Seed from config if state has defaults only and config differs
         if params.long_window == 240 and symbol_cfg.long_window != 240:
             params = StrategyParams(
                 long_window=symbol_cfg.long_window,
@@ -76,11 +90,12 @@ class SymbolTrader:
         return self.feed.last_n_months(months=months)
 
     def evaluate(self) -> Optional[StrategyDecision]:
+        """Evaluate only completed bars; the forming MT5 bar is never included."""
         params = self.strategy.params
         need = params.long_window + 5
-        df = self.feed.copy_rates(need)
+        df = self.feed.copy_closed_rates(need)
         if df is None or len(df) < params.long_window:
-            logger.warning("%s: insufficient bars for evaluation", self.symbol)
+            logger.warning("%s: insufficient closed bars for evaluation", self.symbol)
             return None
         decision = self.strategy.decide(df)
         self._regime_counts[decision.regime] = self._regime_counts.get(decision.regime, 0) + 1
@@ -93,8 +108,23 @@ class SymbolTrader:
         )
         return decision
 
+    def _position_age_bars(self, bar_time: Optional[pd.Timestamp]) -> int:
+        if bar_time is None:
+            return 0
+        positions = self.executor.managed_positions(self.symbol, magic=self.MAGIC)
+        opened = [int(getattr(p, "time", 0) or 0) for p in positions]
+        opened = [t for t in opened if t > 0]
+        if not opened:
+            return 0
+        current = pd.Timestamp(bar_time)
+        if current.tzinfo is None:
+            current = current.tz_localize("UTC")
+        opened_at = pd.Timestamp(datetime.fromtimestamp(min(opened), tz=timezone.utc))
+        minutes = TIMEFRAME_MINUTES.get(self.cfg.timeframe.upper(), 30)
+        return max(0, int((current - opened_at).total_seconds() // (minutes * 60)))
+
     def sync_account_state(self) -> None:
-        """Persist equity/margin/position snapshot into STATE.md."""
+        """Persist account and managed-position state into STATE.md."""
         account = self.connection.account_info()
         if account is None:
             return
@@ -109,28 +139,28 @@ class SymbolTrader:
         if equity > peak_f:
             peak_f = equity
 
-        side = "flat"
-        lots = 0.0
-        try:
+        positions = self.executor.managed_positions(self.symbol, magic=self.MAGIC)
+        if not positions:
+            position_state = {"side": "flat", "lots": 0.0, "entry_time": None}
+        else:
             import MetaTrader5 as mt5
 
-            positions = mt5.positions_get(symbol=self.symbol)
-            if positions:
-                pos = positions[0]
-                side = "long" if pos.type == mt5.POSITION_TYPE_BUY else "short"
-                lots = float(pos.volume)
-        except Exception:
-            pass
+            sides = {"long" if p.type == mt5.POSITION_TYPE_BUY else "short" for p in positions}
+            position_state = {
+                "side": next(iter(sides)) if len(sides) == 1 else "mixed",
+                "lots": sum(float(p.volume) for p in positions),
+                "entry_time": min(int(getattr(p, "time", 0) or 0) for p in positions) or None,
+            }
 
         self.store.update_state(
             equity=equity,
             margin=margin,
             equity_peak=peak_f,
-            position={"side": side, "lots": lots},
+            position=position_state,
         )
 
     def maybe_trade(self, decision: StrategyDecision) -> dict[str, Any]:
-        """Size and place a limit order for the decision signal."""
+        """Reconcile actual positions to one target position for the decision."""
         result: dict[str, Any] = {
             "symbol": self.symbol,
             "signal": int(decision.signal),
@@ -144,25 +174,43 @@ class SymbolTrader:
             logger.warning("%s trade blocked: kill-switch locked", self.symbol)
             return result
 
-        if decision.signal == Signal.FLAT:
-            result["order"] = {"ok": True, "message": "flat"}
+        target_signal = decision.signal
+        age_bars = self._position_age_bars(decision.bar_time)
+        if age_bars >= self.strategy.params.max_hold_bars:
+            target_signal = Signal.FLAT
+            result["forced_flat"] = "max_hold_bars"
+            result["position_age_bars"] = age_bars
+
+        info = self.connection.symbol_info(self.symbol)
+        if info is None:
+            result["order"] = {"ok": False, "message": "missing symbol info"}
+            return result
+        volume_step = float(getattr(info, "volume_step", 0.01) or 0.01)
+
+        if target_signal == Signal.FLAT:
+            reconciliation = self.executor.reconcile_target(
+                symbol=self.symbol,
+                side=Signal.FLAT,
+                volume=0.0,
+                volume_step=volume_step,
+                magic=self.MAGIC,
+            )
+            result["order"] = reconciliation.as_dict()
             self.sync_account_state()
             return result
 
-        info = self.connection.symbol_info(self.symbol)
         account = self.connection.account_info()
         tick = self.feed.tick()
-        if info is None or account is None or tick is None:
+        if account is None or tick is None:
             result["order"] = {"ok": False, "message": "missing market/account info"}
             return result
 
-        price = float(tick.ask if decision.signal == Signal.LONG else tick.bid)
-        equity = float(account.equity)
+        price = float(tick.ask if target_signal == Signal.LONG else tick.bid)
         lots = self.risk.position_lots(
-            equity=equity,
+            equity=float(account.equity),
             price=price,
             contract_size=float(getattr(info, "trade_contract_size", 1) or 1),
-            volume_step=float(getattr(info, "volume_step", 0.01) or 0.01),
+            volume_step=volume_step,
             volume_min=float(getattr(info, "volume_min", 0.01) or 0.01),
             volume_max=float(getattr(info, "volume_max", 5) or 5),
         )
@@ -171,35 +219,24 @@ class SymbolTrader:
             result["order"] = {"ok": False, "message": "kelly lots=0"}
             return result
 
-        # Cancel prior pending for symbol then place new limit
-        self.executor.cancel_pending(self.symbol)
-        order = self.executor.place_limit(
-            OrderRequest(
-                symbol=self.symbol,
-                side=decision.signal,
-                volume=lots,
-                price=0.0,
-                comment=f"lr_{decision.regime[:8]}",
-            )
+        reconciliation = self.executor.reconcile_target(
+            symbol=self.symbol,
+            side=target_signal,
+            volume=lots,
+            volume_step=volume_step,
+            comment=f"lr_{decision.regime[:8]}",
+            magic=self.MAGIC,
         )
-        result["order"] = {
-            "ok": order.ok,
-            "dry_run": order.dry_run,
-            "message": order.message,
-            "retcode": order.retcode,
-            "order_id": order.order,
-            "request": order.request,
-        }
+        result["order"] = reconciliation.as_dict()
         self.sync_account_state()
         return result
 
     def on_new_bar(self) -> Optional[dict[str, Any]]:
-        """Run once per new closed bar (caller detects bar change)."""
-        df = self.feed.copy_rates(3)
+        """Run once for each newly completed bar."""
+        df = self.feed.copy_closed_rates(1)
         if df is None or df.empty:
             return None
-        # Use second-to-last as last closed bar if last may still be forming
-        bar_time = df["time"].iloc[-2] if len(df) >= 2 else df["time"].iloc[-1]
+        bar_time = df["time"].iloc[-1]
         if self._last_bar_time is not None and bar_time <= self._last_bar_time:
             return None
         self._last_bar_time = bar_time
@@ -317,7 +354,7 @@ class SymbolTrader:
         prev_sharpe = last.get("sharpe")
         prev_ic = last.get("ic")
         if prev_sharpe is None:
-            return True  # never validated → trigger optimize
+            return True
 
         fresh = self.backtest_and_validate(
             months=int(self.app_config.get("validator", {}).get("lookback_months", 6))
