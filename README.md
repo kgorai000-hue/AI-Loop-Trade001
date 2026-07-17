@@ -87,10 +87,10 @@ immediately so Task Scheduler and a manual launch cannot double-trade.
 
 GitHub Actions (`.github/workflows/ci.yml`):
 
-| Job | Runner | What it covers |
-|-----|--------|----------------|
-| Ubuntu pytest | `ubuntu-latest` | Py 3.11/3.12 | Full logic suite; `MetaTrader5` stubbed |
-| Windows MT5 wheel compat | `windows-latest` | Py 3.12 | Real `MetaTrader5` wheel import, official constants, `OrderSendResult` / `TradeDeal` / `SymbolInfo` field layouts, `order_send` without a terminal, filling-mode mapping, Windows `os.replace` STATE writes |
+| Job | Runner | Python | What it covers |
+|-----|--------|--------|----------------|
+| Ubuntu pytest | `ubuntu-latest` | 3.11 / 3.12 | Full logic suite; `MetaTrader5` stubbed |
+| Windows MT5 wheel compat | `windows-latest` | 3.12 | Real `MetaTrader5` wheel import, official constants, `OrderSendResult` / `TradeDeal` / `SymbolInfo` field layouts, `order_send` without a terminal, filling-mode mapping, Windows `os.replace` STATE writes |
 
 Live FxPro terminal connection and broker-specific `filling_mode` discovery are **not** exercised in CI (no terminal / credentials on runners).
 

@@ -135,3 +135,26 @@ def test_validation_roundtrip_ranking():
     row = validation_ranking_row(original, params)
     rebuilt = validation_result_from_ranking(row)
     assert rebuilt.as_dict() == original.as_dict()
+
+
+def test_validation_result_preserves_zero_p_values():
+    params = _params(200)
+    original = _val(
+        sharpe=0.0,
+        max_drawdown=0.0,
+        p_value=0.0,
+        ic=0.0,
+        dsr=0.0,
+        hac_p_value=0.0,
+        bootstrap_p_value=0.0,
+        n_trades=0,
+        oos_n_trades=0,
+    )
+    row = validation_ranking_row(original, params)
+    rebuilt = validation_result_from_ranking(row)
+    assert rebuilt.p_value == 0.0
+    assert rebuilt.hac_p_value == 0.0
+    assert rebuilt.bootstrap_p_value == 0.0
+    assert rebuilt.sharpe == 0.0
+    assert rebuilt.dsr == 0.0
+    assert rebuilt.n_trades == 0

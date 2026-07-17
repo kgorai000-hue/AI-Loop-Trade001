@@ -57,6 +57,23 @@ def validation_ranking_row(
     return row
 
 
+def _num(row: dict[str, Any], key: str, default: float) -> float:
+    """Coerce ``row[key]`` to float; only ``None`` / missing uses ``default``.
+
+    Important: ``0.0`` is a valid p-value / metric and must not fall through
+    ``x or default`` (which would incorrectly become ``default``).
+    """
+    if key not in row or row[key] is None:
+        return float(default)
+    return float(row[key])
+
+
+def _int(row: dict[str, Any], key: str, default: int = 0) -> int:
+    if key not in row or row[key] is None:
+        return int(default)
+    return int(row[key])
+
+
 def validation_result_from_ranking(row: dict[str, Any]) -> ValidationResult:
     """Rebuild a ValidationResult from a rankings row (post-gate promotion)."""
     pbo = row.get("pbo")
@@ -64,22 +81,22 @@ def validation_result_from_ranking(row: dict[str, Any]) -> ValidationResult:
         accepted=bool(row.get("accepted")),
         reasons=list(row.get("reasons") or []),
         flags=list(row.get("flags") or []),
-        sharpe=float(row.get("sharpe") or 0.0),
-        max_drawdown=float(row.get("max_drawdown") or 0.0),
-        p_value=float(row.get("p_value") or 1.0),
-        ic=float(row.get("ic") or 0.0),
-        oos_degradation=float(row.get("oos_degradation") or 0.0),
-        is_sharpe=float(row.get("is_sharpe") or 0.0),
-        oos_sharpe=float(row.get("oos_sharpe") or 0.0),
+        sharpe=_num(row, "sharpe", 0.0),
+        max_drawdown=_num(row, "max_drawdown", 0.0),
+        p_value=_num(row, "p_value", 1.0),
+        ic=_num(row, "ic", 0.0),
+        oos_degradation=_num(row, "oos_degradation", 0.0),
+        is_sharpe=_num(row, "is_sharpe", 0.0),
+        oos_sharpe=_num(row, "oos_sharpe", 0.0),
         overfitting=bool(row.get("overfitting")),
-        n_trades=int(row.get("n_trades") or 0),
-        oos_n_trades=int(row.get("oos_n_trades") or 0),
+        n_trades=_int(row, "n_trades", 0),
+        oos_n_trades=_int(row, "oos_n_trades", 0),
         regime_trades=dict(row.get("regime_trades") or {}),
-        p_value_threshold=float(row.get("p_value_threshold") or 0.05),
-        dsr=float(row.get("dsr") or 0.0),
-        sr_star=float(row.get("sr_star") or 0.0),
-        hac_p_value=float(row.get("hac_p_value") or 1.0),
-        bootstrap_p_value=float(row.get("bootstrap_p_value") or 1.0),
+        p_value_threshold=_num(row, "p_value_threshold", 0.05),
+        dsr=_num(row, "dsr", 0.0),
+        sr_star=_num(row, "sr_star", 0.0),
+        hac_p_value=_num(row, "hac_p_value", 1.0),
+        bootstrap_p_value=_num(row, "bootstrap_p_value", 1.0),
         pbo=float(pbo) if pbo is not None else None,
     )
 
@@ -107,7 +124,7 @@ def _accepted_count(rankings: list[dict[str, Any]]) -> int:
 def _survivors_by_sharpe(rankings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(
         (r for r in rankings if r.get("accepted")),
-        key=lambda r: float(r.get("sharpe") or 0.0),
+        key=lambda r: _num(r, "sharpe", 0.0),
         reverse=True,
     )
 
@@ -190,7 +207,7 @@ def apply_fdr_bh_gate(
         return best_params, best_val, accepted_count
 
     alpha = float(cfg.p_value_max)
-    p_values = [float(row.get("p_value", 1.0) or 1.0) for row in rankings]
+    p_values = [_num(row, "p_value", 1.0) for row in rankings]
     mask = benjamini_hochberg_accept(p_values, alpha=alpha)
     reason_tail = f"fails FDR-BH (alpha={alpha}, m={len(p_values)})"
 
