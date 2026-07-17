@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from types import SimpleNamespace
 
@@ -186,7 +186,7 @@ def test_manual_unlock_resumes_kill_switch_monitoring():
 def test_manual_unlock_retriggers_if_drawdown_still_breached():
     store = Store(locked=True, equity_peak=1000.0)
     monitor, store, executor = _monitor(store=store)
-    # Default Connection equity=800 → 20% DD >= 10% max
+    # Default Connection equity=800 -> 20% DD >= 10% max
     monitor._phase = KillPhase.LOCKED_AND_FLAT
     monitor._reason = "prior dd"
     monitor._on_trigger_fired = True

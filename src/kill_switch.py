@@ -113,7 +113,7 @@ class KillSwitchMonitor:
         self._phase = KillPhase.CANCEL_PENDING
         self._on_trigger_fired = True
         logger.critical(
-            "KILL SWITCH resume: locked STATE detected → phase=%s (%s)",
+            "KILL SWITCH resume: locked STATE detected -> phase=%s (%s)",
             self._phase.value,
             self._reason,
         )
@@ -139,7 +139,7 @@ class KillSwitchMonitor:
     def _tick(self) -> None:
         if self._phase == KillPhase.LOCKED_AND_FLAT:
             # Stay dormant only while STATE remains locked. Manual unlock must
-            # resume monitoring — otherwise the trade loop can run unprotected.
+            # resume monitoring -- otherwise the trade loop can run unprotected.
             if self._any_locked():
                 return
             self._resume_after_manual_unlock()
@@ -220,7 +220,7 @@ class KillSwitchMonitor:
             elif self._phase == KillPhase.VERIFY_NO_PENDING:
                 if not self._verify_no_pending():
                     self._phase = KillPhase.CANCEL_PENDING
-                    logger.critical("KILL SWITCH pending remain → re-cancel next poll")
+                    logger.critical("KILL SWITCH pending remain -> re-cancel next poll")
                     return
                 self._phase = KillPhase.CLOSE_POSITIONS
             elif self._phase == KillPhase.CLOSE_POSITIONS:
@@ -238,7 +238,7 @@ class KillSwitchMonitor:
                     else:
                         self._phase = KillPhase.CLOSE_POSITIONS
                     logger.critical(
-                        "KILL SWITCH not flat → resume at %s next poll",
+                        "KILL SWITCH not flat -> resume at %s next poll",
                         self._phase.value,
                     )
                     return
@@ -280,7 +280,7 @@ class KillSwitchMonitor:
                 return False
             if getattr(result, "fetch_failed", False) or not getattr(result, "ok", False):
                 logger.critical(
-                    "KILL SWITCH cancel failed %s → %s",
+                    "KILL SWITCH cancel failed %s -> %s",
                     symbol,
                     getattr(result, "message", result),
                 )
@@ -327,7 +327,7 @@ class KillSwitchMonitor:
                     return False
                 if not result.ok:
                     logger.critical(
-                        "KILL SWITCH close failed %s ticket=%s → %s",
+                        "KILL SWITCH close failed %s ticket=%s -> %s",
                         symbol,
                         getattr(position, "ticket", None),
                         result.message,

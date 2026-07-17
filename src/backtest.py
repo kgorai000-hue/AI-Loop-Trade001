@@ -153,7 +153,7 @@ class Backtester:
     """
     Bar-close signal backtester with optional limit-entry and account sizing.
 
-    Unit mode (account.enabled=False): position ±1, fractional price returns.
+    Unit mode (account.enabled=False): position +/-1, fractional price returns.
     Account mode: Kelly lots, account-currency PnL, margin, SL, stop-out.
     """
 
@@ -297,8 +297,8 @@ class Backtester:
         """Stop fill price with gap-through modeling.
 
         Long:
-          - ``open < SL`` → fill at open (adverse slippage) — gap through
-          - else ``low <= SL`` → fill near SL (adverse slippage)
+          - ``open < SL`` -> fill at open (adverse slippage) -- gap through
+          - else ``low <= SL`` -> fill near SL (adverse slippage)
         Short: mirrored with high / open above SL.
         """
         if stop_loss is None or stop_loss <= 0:

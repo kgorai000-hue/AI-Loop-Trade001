@@ -56,7 +56,7 @@ def test_copy_closed_rates_excludes_forming_bar(monkeypatch):
 
 def test_drop_forming_bars_keeps_only_completed():
     feed = DataFeed(Connection(), "#US30", "M30")
-    # as_of = 12:15 UTC → last closed M30 open is 11:30
+    # as_of = 12:15 UTC -> last closed M30 open is 11:30
     as_of = datetime(2024, 1, 1, 12, 15, tzinfo=timezone.utc)
     df = pd.DataFrame(
         {

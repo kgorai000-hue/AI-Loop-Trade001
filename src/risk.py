@@ -15,7 +15,7 @@ class CostModel:
     """Trading cost as fractions of notional.
 
     Components (all fractions, not bps):
-    - ``spread_fraction``: full bid–ask width (charged **once** per round-trip)
+    - ``spread_fraction``: full bid-ask width (charged **once** per round-trip)
     - ``commission_one_way``: commission each side
     - ``slippage_one_way``: assumed slippage each side (separate from FillModel price slip)
     - ``round_trip_floor``: minimum round-trip cost when live components are tiny/missing
@@ -124,7 +124,7 @@ class CostModel:
             price = float(getattr(symbol_info, "bid", 0) or getattr(symbol_info, "ask", 0) or 0)
 
         if spread_pts > 0 and point > 0 and price and price > 0:
-            # Full bid–ask as fraction; counted once in round-trip.
+            # Full bid-ask as fraction; counted once in round-trip.
             base.spread_fraction = (spread_pts * point) / price
 
         commission = None
@@ -425,7 +425,7 @@ class RiskManager:
             mode = "notional_fallback"
             logger.warning(
                 "position_lots using notional fallback (research/backtest only); "
-                "tick_size/value missing — stop-based risk unavailable"
+                "tick_size/value missing -- stop-based risk unavailable"
             )
         else:
             return LotDecision(

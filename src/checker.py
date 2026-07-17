@@ -21,8 +21,8 @@ You do NOT invent new strategies. You review parameters for:
 - Violations of SKILL lessons (explicit avoid_* constraints)
 - Thin economic rationale
 
-Dual-OLS strategy is FIXED (slope sign agreement → trend; disagreement → mean-reversion).
-Price-line distance is ignored by design — do not reject for that.
+Dual-OLS strategy is FIXED (slope sign agreement -> trend; disagreement -> mean-reversion).
+Price-line distance is ignored by design -- do not reject for that.
 
 Output ONLY valid JSON:
 {
@@ -138,7 +138,7 @@ class StrategyChecker:
             )
             seen.add(key)
 
-        # Any candidate missing from Checker response → reject
+        # Any candidate missing from Checker response -> reject
         for key, cand in by_key.items():
             if key not in seen:
                 reviews.append(

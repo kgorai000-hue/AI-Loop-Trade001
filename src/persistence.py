@@ -21,6 +21,10 @@ _PATH_LOCKS: dict[str, threading.RLock] = {}
 _PATH_LOCKS_GUARD = threading.Lock()
 BACKUP_KEEP = 5
 
+# Dict fields that must be replaced wholesale on ``update_state`` (not shallow-merged).
+# ``last_metrics`` is a snapshot; merging would leave stale keys (pbo/dsr/...).
+_REPLACE_DICT_KEYS = frozenset({"last_metrics"})
+
 
 def _lock_for(path: Path) -> threading.RLock:
     """Process-wide RLock keyed by resolved path (shared across StateStore instances)."""
@@ -103,7 +107,7 @@ class StateStore:
                 _atomic_write_text(
                     self.skill_path,
                     (
-                        f"# SKILL — {self.root.name}\n\n"
+                        f"# SKILL -- {self.root.name}\n\n"
                         "Lessons from Checker rejections, Validator failures, and kill-switch events.\n"
                         "Maker and the grid optimizer read this before the next search.\n\n"
                         "## Lessons\n\n- (none yet)\n"
@@ -192,7 +196,7 @@ class StateStore:
         state = dict(state)
         state["updated_at"] = datetime.now(timezone.utc).isoformat()
         body = yaml.safe_dump(state, sort_keys=False, allow_unicode=True)
-        content = f"# STATE — {self.root.name}\n\n```yaml\n{body}```\n"
+        content = f"# STATE -- {self.root.name}\n\n```yaml\n{body}```\n"
         if backup:
             self._rotate_backup_unlocked()
         _atomic_write_text(self.state_path, content)
@@ -202,11 +206,20 @@ class StateStore:
             self._write_state_unlocked(state, backup=True)
 
     def update_state(self, **kwargs: Any) -> dict[str, Any]:
-        """Read-modify-write under the path lock so kill-switch cannot lose ``locked``."""
+        """Read-modify-write under the path lock so kill-switch cannot lose ``locked``.
+
+        Nested dicts are shallow-merged by default so partial updates (e.g. equity
+        peaks) stay safe. Keys in ``_REPLACE_DICT_KEYS`` (notably ``last_metrics``)
+        are assigned as a full replacement so stale snapshot fields cannot linger.
+        """
         with self._lock:
             state = self._read_state_unlocked()
             for k, v in kwargs.items():
-                if isinstance(v, dict) and isinstance(state.get(k), dict):
+                if (
+                    k not in _REPLACE_DICT_KEYS
+                    and isinstance(v, dict)
+                    and isinstance(state.get(k), dict)
+                ):
                     merged = dict(state[k])
                     merged.update(v)
                     state[k] = merged
@@ -216,7 +229,7 @@ class StateStore:
             return state
 
     def is_locked(self) -> bool:
-        # Fail closed: missing/corrupt → True via read_state.
+        # Fail closed: missing/corrupt -> True via read_state.
         return bool(self.read_state().get("locked", True))
 
     def set_locked(self, locked: bool, reason: str = "") -> None:
@@ -280,7 +293,7 @@ class StateStore:
             existing = existing[-200:]
             ts = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             lines = [
-                f"# SKILL — {self.root.name}",
+                f"# SKILL -- {self.root.name}",
                 "",
                 "Lessons from Checker rejections, Validator failures, and kill-switch events.",
                 "Maker and the grid optimizer read this before the next search.",

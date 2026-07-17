@@ -1,5 +1,5 @@
 # Cross-platform runtime + test deps (pinned).
-# MetaTrader5 is Windows-only — install via requirements-windows.txt on the VPS.
+# MetaTrader5 is Windows-only -- install via requirements-windows.txt on the VPS.
 numpy==2.5.1
 pandas==3.0.3
 scipy==1.18.0

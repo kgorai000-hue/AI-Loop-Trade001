@@ -1,9 +1,9 @@
-# AI-Loop-Trade001 — Windows VPS Dual-OLS + Maker/Checker
+# AI-Loop-Trade001 -- Windows VPS Dual-OLS + Maker/Checker
 
 Windows-VPS CLI system that connects to FxPro MetaTrader 5, trades `#US30`
 on M30 with a dual-window OLS slope strategy, sizes with capped risk (cold-start
 fixed fraction until enough trades for Kelly), and
-self-improves via **Anthropic Maker → Checker → mathematical Validator**
+self-improves via **Anthropic Maker -> Checker -> mathematical Validator**
 (with nested walk-forward / grid-search fallback).
 
 **Target OS: Windows x86-64.** The official `MetaTrader5` package on PyPI ships
@@ -17,7 +17,7 @@ on Ubuntu/Linux for live MT5 access.
 3. **Validator** enforces hard gates (DD, Sharpe band, HAC/bootstrap p-value,
    DSR, PBO, trade-count floors, OOS / nested rolling OOS gate).
 4. Accepted params persist in `state/US30/STATE.md`; failures append to `SKILL.md`.
-5. **KillSwitchMonitor** thread flattens and locks if account DD ≥ 10%.
+5. **KillSwitchMonitor** thread flattens and locks if account DD >= 10%.
 
 ## Setup (Windows VPS)
 
@@ -54,11 +54,11 @@ Linux). `requirements-windows.txt` adds the Windows-only `MetaTrader5` wheel.
 ```powershell
 # Option A: environment / .env
 copy .env.example .env
-# edit .env → ANTHROPIC_API_KEY, MT5_LOGIN, MT5_PASSWORD
+# edit .env -> ANTHROPIC_API_KEY, MT5_LOGIN, MT5_PASSWORD
 
 # Option B: gitignored YAML next to config
 copy secrets.example.yaml secrets.yaml
-# edit secrets.yaml → mt5.login / mt5.password
+# edit secrets.yaml -> mt5.login / mt5.password
 
 $env:ANTHROPIC_API_KEY = "sk-ant-..."   # if not using .env
 cd C:\path\to\AI-Loop-Trade001
@@ -89,8 +89,8 @@ GitHub Actions (`.github/workflows/ci.yml`):
 
 | Job | Runner | What it covers |
 |-----|--------|----------------|
-| Ubuntu pytest | `ubuntu-latest` · Py 3.11/3.12 | Full logic suite; `MetaTrader5` stubbed |
-| Windows MT5 wheel compat | `windows-latest` · Py 3.12 | Real `MetaTrader5` wheel import, official constants, `OrderSendResult` / `TradeDeal` / `SymbolInfo` field layouts, `order_send` without a terminal, filling-mode mapping, Windows `os.replace` STATE writes |
+| Ubuntu pytest | `ubuntu-latest` | Py 3.11/3.12 | Full logic suite; `MetaTrader5` stubbed |
+| Windows MT5 wheel compat | `windows-latest` | Py 3.12 | Real `MetaTrader5` wheel import, official constants, `OrderSendResult` / `TradeDeal` / `SymbolInfo` field layouts, `order_send` without a terminal, filling-mode mapping, Windows `os.replace` STATE writes |
 
 Live FxPro terminal connection and broker-specific `filling_mode` discovery are **not** exercised in CI (no terminal / credentials on runners).
 
@@ -117,7 +117,7 @@ python main.py once --symbol "#US30"
 # Backtest last 6 months against validator gates
 python main.py backtest --symbol "#US30"
 
-# Maker→Checker→Validator (nested / grid fallback if needed)
+# Maker->Checker->Validator (nested / grid fallback if needed)
 python main.py optimize --symbol "#US30"
 
 # Resident loop: M30 bars + kill-switch + weekend review
@@ -132,12 +132,12 @@ python main.py review
 | Gate | Rule |
 |------|------|
 | Max drawdown | < 10% |
-| Sharpe | 1.5 ≤ Sharpe ≤ 3.0 |
+| Sharpe | 1.5 <= Sharpe <= 3.0 |
 | Significance | HAC p-value (unadjusted); DSR/PBO handle selection bias |
-| DSR / PBO | Deflated Sharpe ≥ 0.95 (SR* uses **cross-trial** Sharpe dispersion); search PBO ≤ 0.50 |
-| Sample size | ≥ 40 full-sample trades; ≥ 15 OOS; ≥ 10 per regime |
-| OOS | IS→OOS Sharpe degradation ≤ 30% |
-| Costs | Spread once + commission/slippage each way; ≥ 10 bps **round-trip** floor |
+| DSR / PBO | Deflated Sharpe >= 0.95 (SR* uses **cross-trial** Sharpe dispersion); search PBO <= 0.50 |
+| Sample size | >= 40 full-sample trades; >= 15 OOS; >= 10 per regime |
+| OOS | IS->OOS Sharpe degradation <= 30% |
+| Costs | Spread once + commission/slippage each way; >= 10 bps **round-trip** floor |
 
 Bootstrap p-values are optional diagnostics (`pvalue_method: block_bootstrap|max`).
 The block bootstrap uses **fixed-length circular blocks** by default (wrap-around;
@@ -145,8 +145,8 @@ no short tail blocks). Do not pair them with Bonferroni at low
 `block_bootstrap_reps`: the floor
 `1/(n_boot+1)` can sit above `alpha/m`, making every grid candidate impossible.
 If you enable a bootstrap gate, use `multiple_testing: none` or raise reps so
-`1/(n_boot+1) < alpha/m` (e.g. ≥12 000 for 120 tests at α=0.05). `fdr_bh` now
-runs a true Benjamini–Hochberg pass over the search family (not α/m).
+`1/(n_boot+1) < alpha/m` (e.g. >=12 000 for 120 tests at alpha=0.05). `fdr_bh` now
+runs a true Benjamini-Hochberg pass over the search family (not alpha/m).
 
 ## Layout
 
@@ -166,7 +166,7 @@ runs a true Benjamini–Hochberg pass over the search family (not α/m).
 | `src/splits.py` | Holdout / walk-forward splits |
 | `src/anthropic_client.py` | Backoff + prompt cache |
 | `src/maker.py` / `src/checker.py` | LLM intelligence layer |
-| `src/intelligence.py` | Maker→Checker→Validator orchestrator |
+| `src/intelligence.py` | Maker->Checker->Validator orchestrator |
 | `src/kill_switch.py` | DD monitor thread |
 | `src/persistence.py` | `STATE.md` / `SKILL.md` |
 | `src/symbol_trader.py` | Per-symbol orchestration |
@@ -176,7 +176,7 @@ runs a true Benjamini–Hochberg pass over the search family (not α/m).
 ## Strategy (summary)
 
 - OLS slope on close: `b_long` (default 240 bars), `b_short` (48 bars).
-- Same sign → trend follow `sign(b_long)`.
-- Opposite sign → mean-reversion against `b_short`.
-- Price–line distance is ignored; slope relationship only.
-- Maker never emits strategy code — only `long_window` / `short_window` / `max_hold_bars`.
+- Same sign -> trend follow `sign(b_long)`.
+- Opposite sign -> mean-reversion against `b_short`.
+- Price-line distance is ignored; slope relationship only.
+- Maker never emits strategy code -- only `long_window` / `short_window` / `max_hold_bars`.

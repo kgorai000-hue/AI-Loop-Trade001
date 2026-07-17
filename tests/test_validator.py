@@ -143,7 +143,7 @@ def test_circular_block_resample_fixed_length_at_tail():
     from src.inference import circular_block_resample
 
     data = np.arange(10, dtype=float)
-    # Start at index 8 with block=4 → must wrap: 8,9,0,1 (not a short 8,9)
+    # Start at index 8 with block=4 -> must wrap: 8,9,0,1 (not a short 8,9)
     out = circular_block_resample(data, block=4, starts=np.array([8, 2, 5]))
     assert len(out) == 10
     assert list(out[:4]) == [8.0, 9.0, 0.0, 1.0]
@@ -247,7 +247,7 @@ def test_validator_regime_and_bonferroni():
         [Regime.TREND] * 30 + [Regime.MEAN_REVERSION] * 30
     )
     trades = [{"entry_i": i, "pnl": 0.01} for i in range(8)]  # all trend
-    # Near-zero returns → high HAC p; Bonferroni tightens further.
+    # Near-zero returns -> high HAC p; Bonferroni tightens further.
     flat = pd.Series(np.zeros(60))
     cfg = ValidatorConfig(
         min_trades=5,
@@ -337,7 +337,7 @@ def test_hac_inflates_p_under_autocorrelation():
 
     rng = np.random.default_rng(7)
     e = rng.normal(0.0, 0.01, size=500)
-    # AR(1) with mild positive drift — IID t-test overstates significance.
+    # AR(1) with mild positive drift -- IID t-test overstates significance.
     r = np.zeros(500)
     for i in range(1, 500):
         r[i] = 0.6 * r[i - 1] + e[i] + 0.0003
@@ -364,7 +364,7 @@ def test_dsr_sr_star_uses_trial_dispersion_not_estimation_se():
 
     rng = np.random.default_rng(7)
     edged = pd.Series(rng.normal(0.002, 0.01, size=500))
-    # Wide family of candidate Sharpes → larger SR* than homogeneous SE fallback.
+    # Wide family of candidate Sharpes -> larger SR* than homogeneous SE fallback.
     family = list(rng.normal(0.0, 0.15, size=40))
     _dsr_f, sr_star_f, sr = deflated_sharpe_ratio(
         edged, n_trials=40, trial_sharpes=family
@@ -412,7 +412,7 @@ def test_pbo_high_when_noise_strategies():
     from src.metrics import probability_of_backtest_overfitting
 
     rng = np.random.default_rng(11)
-    # Unrelated noise strategies → high PBO
+    # Unrelated noise strategies -> high PBO
     mat = rng.normal(0.0, 0.01, size=(400, 20))
     pbo = probability_of_backtest_overfitting(mat, n_slices=8)
     assert pbo > 0.3

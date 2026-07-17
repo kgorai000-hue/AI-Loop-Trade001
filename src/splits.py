@@ -1,6 +1,6 @@
 """Chronological rolling-OOS and walk-forward fold helpers for nested search.
 
-Periodic re-optimization uses a *rolling OOS* gate — not a permanent sealed
+Periodic re-optimization uses a *rolling OOS* gate -- not a permanent sealed
 holdout. A true never-observed holdout would require a frozen end date that is
 never re-entered; weekly ops cannot claim that.
 """
@@ -76,7 +76,7 @@ def chronological_rolling_oos(
         # Only *new* bars after the last evaluated OOS end may gate.
         rolling = candidate.loc[times > excl].reset_index(drop=True)
         if len(rolling) < min_oos_bars:
-            # Insufficient unseen bars — fail-closed at the caller.
+            # Insufficient unseen bars -- fail-closed at the caller.
             return df.reset_index(drop=True), empty, None
         oos_start = rolling["time"].iloc[0]
         search = df.loc[df["time"] < oos_start].reset_index(drop=True)

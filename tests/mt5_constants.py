@@ -1,6 +1,6 @@
 """Official MetaTrader5==5.0.5735 constants shared by Linux stub and Windows CI.
 
-Keep this module under ``tests/`` — production code imports the real package
+Keep this module under ``tests/`` -- production code imports the real package
 (or the conftest stub that mirrors these values).
 """
 

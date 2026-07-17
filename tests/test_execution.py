@@ -213,7 +213,7 @@ def test_same_side_within_rebalance_band_holds_without_churn(monkeypatch):
     monkeypatch.setattr(mt5, "order_send", lambda request: sent.append(request))
 
     executor = OrderExecutor(Connection(), execute=True, account_type="demo")
-    # ~10% drift from equity change — inside default 15% band
+    # ~10% drift from equity change -- inside default 15% band
     result = executor.reconcile_target(
         symbol="#US30", side=Signal.LONG, volume=1.10, rebalance_band=0.15
     )
@@ -453,7 +453,7 @@ def test_reverse_blocks_entry_when_close_leaves_residual(monkeypatch):
     assert result.ok is False
     assert result.action == "close_incomplete"
     assert "new entry blocked" in result.message
-    # Only close deals — no opposite pending entry.
+    # Only close deals -- no opposite pending entry.
     assert sent
     assert all(r["action"] == mt5.TRADE_ACTION_DEAL for r in sent)
     assert all("position" in r for r in sent)
@@ -956,7 +956,7 @@ def test_close_uses_realized_deal_pnl_not_position_mtm(monkeypatch):
         lambda symbol: SimpleNamespace(bid=40000.0, ask=40001.0),
     )
 
-    # Deliberately wrong MTM on the open position — must be ignored.
+    # Deliberately wrong MTM on the open position -- must be ignored.
     pos = _position(Signal.LONG, volume=1.0, ticket=42)
     pos.profit = 999.0
     pos.swap = 0.0

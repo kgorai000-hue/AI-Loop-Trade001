@@ -33,7 +33,7 @@ class ValidatorConfig:
     oos_degradation_max: float = 0.30
     is_fraction: float = 0.70
     # Nested search: outer walk-forward + rolling OOS gate (periodic ops).
-    # This is not a permanent sealed holdout — evaluated windows are persisted
+    # This is not a permanent sealed holdout -- evaluated windows are persisted
     # and must not be reused; scores must not feed Maker/Checker/SKILL.
     rolling_oos_fraction: float = 0.15
     # Deprecated alias kept for ValidatorConfig(holdout_fraction=...) call sites.
@@ -50,11 +50,11 @@ class ValidatorConfig:
     # Bonferroni on bootstrap p-values is often *mathematically impossible*
     # (min p = 1/(n_boot+1) > alpha/m). Default: unadjusted HAC p-gate.
     multiple_testing: str = "none"  # none | bonferroni | fdr_bh
-    n_tests: int = 0  # 0 → use per-call n_tests or 1
+    n_tests: int = 0  # 0 -> use per-call n_tests or 1
     # pvalue_method: iid | hac | block_bootstrap | max
     # Gate uses this method; with ``hac`` (default) bootstrap is optional diagnostics.
     pvalue_method: str = "hac"
-    hac_lags: int = 0  # 0 → Newey–West automatic bandwidth
+    hac_lags: int = 0  # 0 -> Newey-West automatic bandwidth
     min_dsr: float = 0.95  # Deflated Sharpe Ratio floor (0 disables)
     pbo_max: float = 0.50  # Probability of Backtest Overfitting ceiling
     pbo_slices: int = 8  # CSCV partitions (even)
@@ -136,7 +136,7 @@ class StrategyValidator:
         """Return (gate_p, hac_p, boot_p, flags).
 
         Bootstrap resolution is ``1/(n_boot+1)``. If the configured multiple-testing
-        threshold sits *below* that floor, a bootstrap (or max) gate can never pass —
+        threshold sits *below* that floor, a bootstrap (or max) gate can never pass --
         fall back to HAC for the gate and keep bootstrap as a diagnostic.
         """
         cfg = self.config

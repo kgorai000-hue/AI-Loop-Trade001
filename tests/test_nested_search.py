@@ -301,7 +301,7 @@ def test_run_nested_rejects_reused_rolling_oos_window(monkeypatch):
     monkeypatch.setattr(intel, "_run_on_segment", fake_segment)
 
     df = _frame(400)
-    # Exclude through the end of the frame → no new OOS bars.
+    # Exclude through the end of the frame -> no new OOS bars.
     outcome = intel.run_nested(df, exclude_oos_before=df["time"].iloc[-1])
     assert outcome.best_params is None
     assert outcome.rolling_oos_window is None

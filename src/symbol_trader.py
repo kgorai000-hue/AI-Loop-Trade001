@@ -1,4 +1,4 @@
-"""Per-symbol orchestration: closed bars → target position → execution."""
+"""Per-symbol orchestration: closed bars -> target position -> execution."""
 
 from __future__ import annotations
 
@@ -252,7 +252,7 @@ class SymbolTrader:
 
         price = float(tick.ask if target_signal == Signal.LONG else tick.bid)
         point = float(getattr(info, "point", 0.01) or 0.01)
-        # Live: never substitute point for missing tick_size — that hides bad specs.
+        # Live: never substitute point for missing tick_size -- that hides bad specs.
         tick_size = float(getattr(info, "trade_tick_size", 0) or 0)
         tick_value = float(getattr(info, "trade_tick_value", 0) or 0)
         digits = int(getattr(info, "digits", 2) or 2)
@@ -370,7 +370,7 @@ class SymbolTrader:
     ) -> Optional[float]:
         """Account-currency loss for 1 lot at SL via ``order_calc_profit``.
 
-        Returns ``None`` when MT5 cannot compute profit — live path must block.
+        Returns ``None`` when MT5 cannot compute profit -- live path must block.
         """
         calc = getattr(self.connection, "order_calc_profit", None)
         if not callable(calc):
@@ -438,7 +438,7 @@ class SymbolTrader:
         """Record confirmed realized close PnL into Kelly history.
 
         ``closed_pnl is None`` means the close deal was not confirmed via
-        history — skip rather than learning from pre-close MTM estimates.
+        history -- skip rather than learning from pre-close MTM estimates.
         """
         recorded = False
         for order in getattr(reconciliation, "orders", []) or []:
@@ -484,7 +484,7 @@ class SymbolTrader:
         if order.get("ok"):
             return True
         message = str(order.get("message", ""))
-        # Sizing declined the trade for this bar — still a completed decision.
+        # Sizing declined the trade for this bar -- still a completed decision.
         if message.startswith("lots=0") or "lots=0 (" in message:
             return True
         return False
@@ -587,7 +587,7 @@ class SymbolTrader:
             outcome = intel.run(df)
 
         # Record rolling OOS period boundaries whenever the gate was attempted,
-        # accept or reject — never reuse the same window.
+        # accept or reject -- never reuse the same window.
         if outcome.rolling_oos_window is not None:
             self._record_rolling_oos_window(outcome.rolling_oos_window)
 
@@ -626,7 +626,7 @@ class SymbolTrader:
                 outcome.path,
             )
         else:
-            # Generic failure note only — no rolling OOS metrics/reasons.
+            # Generic failure note only -- no rolling OOS metrics/reasons.
             self.store.append_lesson(
                 "Weekend/optimize cycle found no validator-passing params "
                 f"(path={outcome.path})"
@@ -678,8 +678,21 @@ class SymbolTrader:
             last_rolling_oos=entry,
         )
 
-    def metrics_degraded(self, sharpe_trigger: float = 0.20, ic_trigger: float = 0.20) -> bool:
-        """Compare a fresh backtest vs stored last_metrics."""
+    def metrics_degraded(
+        self, sharpe_trigger: float = 0.20, ic_trigger: float = 0.20
+    ) -> Optional[bool]:
+        """Compare a fresh backtest vs stored last_metrics.
+
+        Returns
+        -------
+        True
+            Metrics degraded (or no prior metrics) -> re-optimize.
+        False
+            Metrics stable -> skip optimize.
+        None
+            Fresh backtest/validation failed (transient MT5/data error). Caller
+            must **not** treat this as stable and should retry the review.
+        """
         state = self.store.read_state()
         last = state.get("last_metrics") or {}
         prev_sharpe = last.get("sharpe")
@@ -691,7 +704,12 @@ class SymbolTrader:
             months=int(self.app_config.get("validator", {}).get("lookback_months", 6))
         )
         if not fresh.get("ok"):
-            return False
+            logger.warning(
+                "%s metrics check failed (fresh backtest unavailable): %s",
+                self.symbol,
+                fresh.get("error") or fresh,
+            )
+            return None
         cur_sharpe = fresh["validation"]["sharpe"]
         cur_ic = fresh["validation"]["ic"]
 

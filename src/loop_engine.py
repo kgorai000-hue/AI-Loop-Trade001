@@ -22,7 +22,7 @@ class LoopEngine:
     """
     Holds a list of SymbolTrader instances (multi-symbol ready).
     - Polls every `poll_seconds` for new closed bars.
-    - On configured weekday/hour, runs review sub-loop (metric check → optimize).
+    - On configured weekday/hour, runs review sub-loop (metric check -> optimize).
     - KillSwitchMonitor thread flattens and locks on account DD breach.
     - Each SymbolTrader owns its own RiskManager (per-symbol Kelly history).
     """
@@ -58,7 +58,7 @@ class LoopEngine:
 
         state_dir = Path(config.get("paths", {}).get("state_dir", "state"))
         if not state_dir.is_absolute():
-            # Relative state_dir follows process cwd — Task Scheduler often leaves
+            # Relative state_dir follows process cwd -- Task Scheduler often leaves
             # "Start in" empty, which would orphan kill-switch / bar / PnL state.
             raise ValueError(
                 f"paths.state_dir must be absolute (got {state_dir!r}); "
@@ -167,26 +167,54 @@ class LoopEngine:
             return False
         return True
 
+    @staticmethod
+    def _review_outcome_settled(outcome: dict[str, Any]) -> bool:
+        """True when this symbol's review need not be retried today."""
+        if outcome.get("ok"):
+            return True
+        # Locked accounts cannot be optimized; count as settled for the day.
+        return outcome.get("error") == "locked"
+
     def review_subloop(self) -> list[dict[str, Any]]:
-        """Weekend review: if Sharpe/IC degraded, re-optimize and apply if validated."""
+        """Weekend review: if Sharpe/IC degraded, re-optimize and apply if validated.
+
+        ``last_review_date`` is persisted only when every symbol settles
+        successfully (or is locked). Transient metrics/optimize failures leave
+        the date unset so ``should_review`` can retry later the same day.
+        """
         opt_cfg = self.config.get("optimizer", {})
         sharpe_trig = float(opt_cfg.get("sharpe_degrade_trigger", 0.20))
         ic_trig = float(opt_cfg.get("ic_degrade_trigger", 0.20))
         months = int(self.config.get("validator", {}).get("lookback_months", 6))
 
-        outcomes = []
+        outcomes: list[dict[str, Any]] = []
         for t in self.traders:
             if t.store.is_locked():
                 outcomes.append({"symbol": t.symbol, "ok": False, "error": "locked"})
                 continue
             logger.info("Review sub-loop starting for %s", t.symbol)
             try:
-                degraded = t.metrics_degraded(sharpe_trigger=sharpe_trig, ic_trigger=ic_trig)
+                degraded = t.metrics_degraded(
+                    sharpe_trigger=sharpe_trig, ic_trigger=ic_trig
+                )
+                if degraded is None:
+                    logger.warning(
+                        "%s metrics check inconclusive -> defer review date",
+                        t.symbol,
+                    )
+                    outcomes.append(
+                        {
+                            "symbol": t.symbol,
+                            "ok": False,
+                            "error": "metrics_check_failed",
+                        }
+                    )
+                    continue
                 if degraded:
-                    logger.info("%s metrics degraded → optimizing", t.symbol)
+                    logger.info("%s metrics degraded -> optimizing", t.symbol)
                     out = t.optimize(months=months)
                 else:
-                    logger.info("%s metrics stable → skip optimize", t.symbol)
+                    logger.info("%s metrics stable -> skip optimize", t.symbol)
                     out = {"ok": True, "skipped": True, "reason": "metrics_stable"}
                 out["symbol"] = t.symbol
                 outcomes.append(out)
@@ -194,8 +222,23 @@ class LoopEngine:
                 logger.exception("Review failed for %s", t.symbol)
                 outcomes.append({"symbol": t.symbol, "ok": False, "error": str(exc)})
 
-        day_key = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        self._persist_last_review_date(day_key)
+        if outcomes and all(self._review_outcome_settled(o) for o in outcomes):
+            day_key = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            self._persist_last_review_date(day_key)
+        else:
+            logger.warning(
+                "Review incomplete; last_review_date not persisted (will retry). "
+                "outcomes=%s",
+                [
+                    {
+                        "symbol": o.get("symbol"),
+                        "ok": o.get("ok"),
+                        "error": o.get("error"),
+                        "skipped": o.get("skipped"),
+                    }
+                    for o in outcomes
+                ],
+            )
         return outcomes
 
     def run_forever(self) -> None:

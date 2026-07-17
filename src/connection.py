@@ -125,7 +125,7 @@ class MT5Connection:
 
         On timeout the specific job is marked ``abandoned``. If it has not started,
         the worker skips it. If ``order_send`` is already running it cannot be
-        cancelled — callers must treat that as result-unknown and reconcile before
+        cancelled -- callers must treat that as result-unknown and reconcile before
         retrying (never auto-resend the same order).
         """
         self.start()
@@ -141,7 +141,7 @@ class MT5Connection:
             job.abandoned = True
             raise MT5InvokeTimeout(
                 f"MT5 invoke timed out after {self.invoke_timeout_sec:.1f}s "
-                f"({fn_name}); job abandoned — treat order results as unknown "
+                f"({fn_name}); job abandoned -- treat order results as unknown "
                 f"until reconciled",
                 fn_name=str(fn_name),
                 abandoned=True,
@@ -171,7 +171,7 @@ class MT5Connection:
                 continue
             try:
                 job.result = job.fn(*job.args, **job.kwargs)
-            except BaseException as exc:  # noqa: BLE001 — surface to caller
+            except BaseException as exc:  # noqa: BLE001 -- surface to caller
                 job.error = exc
             finally:
                 if job.abandoned:

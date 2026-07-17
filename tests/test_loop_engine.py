@@ -76,3 +76,44 @@ def test_each_symbol_gets_independent_risk_manager(tmp_path: Path):
     a.risk.record_trade(3.0)
     assert 3.0 in a.risk.recent_pnls
     assert 3.0 not in b.risk.recent_pnls
+
+
+def test_review_does_not_persist_date_when_metrics_check_fails(tmp_path: Path, monkeypatch):
+    cfg = _minimal_config(str(tmp_path))
+    engine = LoopEngine(cfg)
+    trader = engine.traders[0]
+    monkeypatch.setattr(trader, "metrics_degraded", lambda **kwargs: None)
+
+    outcomes = engine.review_subloop()
+    assert outcomes[0]["ok"] is False
+    assert outcomes[0]["error"] == "metrics_check_failed"
+    assert StateStore(tmp_path, "US30").read_state().get("last_review_date") is None
+    assert engine._last_review_date is None
+
+
+def test_review_persists_date_when_metrics_stable(tmp_path: Path, monkeypatch):
+    cfg = _minimal_config(str(tmp_path))
+    engine = LoopEngine(cfg)
+    trader = engine.traders[0]
+    monkeypatch.setattr(trader, "metrics_degraded", lambda **kwargs: False)
+
+    outcomes = engine.review_subloop()
+    assert outcomes[0]["ok"] is True
+    assert outcomes[0].get("skipped") is True
+    day = StateStore(tmp_path, "US30").read_state().get("last_review_date")
+    assert day is not None
+    assert engine._last_review_date == day
+
+
+def test_review_does_not_persist_date_when_optimize_fails(tmp_path: Path, monkeypatch):
+    cfg = _minimal_config(str(tmp_path))
+    engine = LoopEngine(cfg)
+    trader = engine.traders[0]
+    monkeypatch.setattr(trader, "metrics_degraded", lambda **kwargs: True)
+    monkeypatch.setattr(
+        trader, "optimize", lambda months=6: {"ok": False, "error": "no history"}
+    )
+
+    outcomes = engine.review_subloop()
+    assert outcomes[0]["ok"] is False
+    assert StateStore(tmp_path, "US30").read_state().get("last_review_date") is None

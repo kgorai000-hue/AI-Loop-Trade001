@@ -4,7 +4,7 @@ Ubuntu CI uses a stub (``tests/conftest.py``) when the Windows-only wheel is
 absent. This module asserts the official constant values and, on Windows with
 the real package installed, namedtuple field layouts used by live trading code.
 
-It does **not** require a running MT5 terminal or FxPro login — ``initialize`` /
+It does **not** require a running MT5 terminal or FxPro login -- ``initialize`` /
 broker filling discovery remain out of scope for CI.
 """
 
@@ -102,7 +102,7 @@ def test_mt5_constants_match_official_wheel(name: str, expected: int):
 
 
 def test_order_check_without_terminal_returns_none_or_result():
-    """No initialize() — must not crash; None or a CheckResult are both OK."""
+    """No initialize() -- must not crash; None or a CheckResult are both OK."""
     result = mt5.order_check(
         {
             "action": mt5.TRADE_ACTION_DEAL,
@@ -120,7 +120,7 @@ def test_order_check_without_terminal_returns_none_or_result():
 
 
 def test_order_send_without_terminal_returns_none():
-    """No initialize() — both stub and real wheel return None (not a crash)."""
+    """No initialize() -- both stub and real wheel return None (not a crash)."""
     result = mt5.order_send(
         {
             "action": mt5.TRADE_ACTION_DEAL,
@@ -138,7 +138,7 @@ def test_order_send_without_terminal_returns_none():
 
 
 def test_fxpro_style_filling_mode_selection():
-    """Bitmask on SymbolInfo.filling_mode → ORDER_FILLING_* (FxPro IOC common)."""
+    """Bitmask on SymbolInfo.filling_mode -> ORDER_FILLING_* (FxPro IOC common)."""
     assert OrderExecutor._deal_filling_mode(SimpleNamespace(filling_mode=2)) == mt5.ORDER_FILLING_IOC
     assert OrderExecutor._deal_filling_mode(SimpleNamespace(filling_mode=1)) == mt5.ORDER_FILLING_FOK
     assert OrderExecutor._deal_filling_mode(SimpleNamespace(filling_mode=3)) == mt5.ORDER_FILLING_IOC

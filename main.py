@@ -29,7 +29,7 @@ def load_config(path: str | Path, *, base: str | Path | None = None) -> dict[str
     Scheduler when "Start in" is empty). Absolute path settings are left as-is.
 
     MT5 login/password come from ``.env`` / ``secrets.yaml`` / environment
-    variables — never from tracked ``config.yaml`` values.
+    variables -- never from tracked ``config.yaml`` values.
     """
     path = Path(path).resolve()
     config_dir = path.parent
@@ -151,7 +151,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     opt = sub.add_parser(
         "optimize",
-        help="Maker→Checker→Validator search (grid fallback if needed)",
+        help="Maker->Checker->Validator search (grid fallback if needed)",
     )
     opt.add_argument("--symbol", default=None)
     opt.add_argument("--months", type=int, default=None)

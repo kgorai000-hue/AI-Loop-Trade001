@@ -49,8 +49,8 @@ class RegressionStrategy:
     """
     Compute OLS slopes on close prices for long/short windows.
 
-    - Same sign (b_long * b_short > 0): trend regime → follow sign(b_long)
-    - Opposite sign: mean-reversion → fade sign(b_short)
+    - Same sign (b_long * b_short > 0): trend regime -> follow sign(b_long)
+    - Opposite sign: mean-reversion -> fade sign(b_short)
     Price distance to the regression line is ignored.
     """
 
@@ -67,7 +67,7 @@ class RegressionStrategy:
             return 0.0
         x = np.arange(n, dtype=float)
         y = np.asarray(closes, dtype=float)
-        # numpy.polyfit degree-1 → [slope, intercept]
+        # numpy.polyfit degree-1 -> [slope, intercept]
         slope, _ = np.polyfit(x, y, 1)
         return float(slope)
 

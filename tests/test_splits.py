@@ -92,7 +92,7 @@ def test_walk_forward_folds_never_leak_future_into_train():
 def test_walk_forward_enforces_min_train_fraction_not_just_bars():
     """When min_test_bars inflates fold OOS, train must still meet fraction.
 
-    n=200, fraction=0.5 → min_train=100. With folds_n=3 and min_test_bars=40,
+    n=200, fraction=0.5 -> min_train=100. With folds_n=3 and min_test_bars=40,
     a naive check against min_train_bars=50 would accept a 80-bar train fold.
     """
     df = _frame(200)

@@ -54,8 +54,8 @@ class OrderResult:
     dry_run: bool = False
     request: Optional[dict] = None
     closed_pnl: Optional[float] = None
-    partial: bool = False  # DONE_PARTIAL / incomplete fill — not a finished close
-    unknown: bool = False  # invoke timeout — result unknown; do not auto-retry
+    partial: bool = False  # DONE_PARTIAL / incomplete fill -- not a finished close
+    unknown: bool = False  # invoke timeout -- result unknown; do not auto-retry
     intent_id: Optional[str] = None
 
 
@@ -230,7 +230,7 @@ class OrderExecutor:
             self._intents[intent_id] = intent
         self._persist_intents(state_store, symbol)
         logger.error(
-            "Order result UNKNOWN after timeout intent=%s kind=%s symbol=%s — "
+            "Order result UNKNOWN after timeout intent=%s kind=%s symbol=%s -- "
             "reorder blocked until reconciled",
             intent_id,
             kind,
@@ -364,7 +364,7 @@ class OrderExecutor:
                 continue
             age = self._intent_age_sec(intent)
             if age >= self.intent_settle_sec:
-                # No broker evidence after settle window — treat as never-landed
+                # No broker evidence after settle window -- treat as never-landed
                 # (typical when the queued job was skipped after abandon).
                 self._clear_intent(
                     intent_id,
@@ -768,7 +768,7 @@ class OrderExecutor:
     ) -> Optional[float]:
         """Fetch realized close PnL from deal history after a successful close.
 
-        Returns ``None`` when the close deal cannot be confirmed — callers must
+        Returns ``None`` when the close deal cannot be confirmed -- callers must
         not feed unconfirmed MTM estimates into Kelly learning.
         """
         for attempt in range(max(1, int(attempts))):
@@ -785,7 +785,7 @@ class OrderExecutor:
                 ]
 
             if not deals and intent_id:
-                # Intent-scoped fallback only — never sum unrelated prior OUT deals.
+                # Intent-scoped fallback only -- never sum unrelated prior OUT deals.
                 pos_deals = self._history_deals_lookup(position=int(position_ticket))
                 if not pos_deals:
                     date_to = datetime.now(timezone.utc)
@@ -830,7 +830,7 @@ class OrderExecutor:
 
         logger.warning(
             "Close deal history unconfirmed for position=%s deal=%s order=%s "
-            "intent=%s — leaving closed_pnl unset (Kelly skip)",
+            "intent=%s -- leaving closed_pnl unset (Kelly skip)",
             position_ticket,
             deal_ticket,
             order_ticket,
@@ -878,7 +878,7 @@ class OrderExecutor:
         }
         if not allowed:
             logger.info("DRY-RUN close skipped (%s): %s", reason, request)
-            # No realized deal — do not invent MTM PnL for Kelly.
+            # No realized deal -- do not invent MTM PnL for Kelly.
             return OrderResult(
                 ok=True,
                 message=f"dry-run close: {reason}",
@@ -918,7 +918,7 @@ class OrderExecutor:
         Returns the list of close attempts, or None when a position query failed.
         Callers must still re-fetch and confirm flat before opening the opposite side.
 
-        Result-unknown (invoke timeout) stops further closes — never auto-retry the
+        Result-unknown (invoke timeout) stops further closes -- never auto-retry the
         same close until the intent is reconciled.
         """
         results: list[OrderResult] = []
@@ -996,12 +996,12 @@ class OrderExecutor:
         """Move managed positions toward one desired side/volume without stacking.
 
         Same-side exposure uses entry-sized lots within ``rebalance_band`` (relative).
-        Outside the band, only the delta is topped up or trimmed — not a full
+        Outside the band, only the delta is topped up or trimmed -- not a full
         close/re-open. Target match is filled + same-side pending (RETURN partials).
 
         After an ``order_send`` invoke timeout, intents stay ``unknown`` until
         matched via orders/positions/deals (or settled absent). New orders are
-        blocked until then — timeouts must not auto-retry.
+        blocked until then -- timeouts must not auto-retry.
         """
         del comment  # live comments are intent-stamped; regime text is not broker-safe alone
         block = self._reconcile_unknown_intents(symbol, magic, state_store)
@@ -1083,7 +1083,7 @@ class OrderExecutor:
                 orders=closes,
             )
 
-        # Fully filled to target — cancel any leftover working orders.
+        # Fully filled to target -- cancel any leftover working orders.
         fully_filled = (
             len(current_sides) == 1
             and side in current_sides
@@ -1160,7 +1160,7 @@ class OrderExecutor:
                 state_store=state_store,
             )
 
-        # Side change or mixed exposure — conservative close-then-open.
+        # Side change or mixed exposure -- conservative close-then-open.
         cancel_err = self._require_pending_cleared(
             symbol, magic=magic, state_store=state_store
         )
@@ -1479,7 +1479,7 @@ class OrderExecutor:
     def _success_retcodes() -> set[int]:
         """MT5 retcodes that mean the request fully completed or was accepted as pending.
 
-        ``TRADE_RETCODE_DONE_PARTIAL`` is intentionally excluded — partial fills are
+        ``TRADE_RETCODE_DONE_PARTIAL`` is intentionally excluded -- partial fills are
         incomplete and must be retried / verified flat before opposite entry.
         """
         codes = {
@@ -1539,7 +1539,7 @@ class OrderExecutor:
                 ),
                 request=request,
             )
-        except Exception as exc:  # noqa: BLE001 — fail closed before live send
+        except Exception as exc:  # noqa: BLE001 -- fail closed before live send
             logger.exception("%s order_check raised; refusing order_send", operation)
             return OrderResult(
                 ok=False,
@@ -1625,7 +1625,7 @@ class OrderExecutor:
                 intent_id=intent_id,
                 message=(
                     f"result unknown after invoke timeout ({exc.fn_name}); "
-                    "do not auto-retry — reconcile via orders/positions/deals"
+                    "do not auto-retry -- reconcile via orders/positions/deals"
                 ),
                 request=request,
             )
@@ -1640,7 +1640,7 @@ class OrderExecutor:
         message = getattr(result, "comment", "") or str(retcode)
         if self._is_partial_retcode(retcode):
             logger.warning(
-                "%s partial fill retcode=%s comment=%s — treating as incomplete",
+                "%s partial fill retcode=%s comment=%s -- treating as incomplete",
                 operation,
                 retcode,
                 message,

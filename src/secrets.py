@@ -1,4 +1,4 @@
-"""Load MT5 credentials from environment / gitignored files — never from tracked config."""
+"""Load MT5 credentials from environment / gitignored files -- never from tracked config."""
 
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ def apply_mt5_credentials(
 ) -> dict[str, Any]:
     """Overlay MT5 login/password (and optional server) from secrets / env.
 
-    Precedence (highest last): ``secrets.yaml`` → environment variables.
+    Precedence (highest last): ``secrets.yaml`` -> environment variables.
     Non-empty ``mt5.password`` / ``mt5.login`` in the tracked config are cleared
     with a warning so a mistaken commit cannot become the live credential source.
     """

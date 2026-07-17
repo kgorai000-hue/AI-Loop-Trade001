@@ -1,4 +1,4 @@
-"""Self-improvement orchestrator: Maker → Checker → math Validator → grid fallback."""
+"""Self-improvement orchestrator: Maker -> Checker -> math Validator -> grid fallback."""
 
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ class IntelligenceOutcome:
     checker_rejected: int = 0
     maker_proposed: int = 0
     fold_results: list[dict[str, Any]] = field(default_factory=list)
-    # Rolling OOS gate only — never feed these metrics/reasons into Maker,
+    # Rolling OOS gate only -- never feed these metrics/reasons into Maker,
     # Checker, SKILL, or last_metrics (that would adapt to the gate).
     rolling_oos_validation: Optional[ValidationResult] = None
     rolling_oos_window: Optional[dict[str, str]] = None
@@ -54,9 +54,9 @@ class IntelligenceLoop:
     Nested mode (``run_nested``) for periodic ops:
       1) Peel *rolling OOS* (not a permanent sealed holdout)
       2) Outer walk-forward: each fold selects on train, scores on *that* fold OOS
-      3) Aggregate fold OOS Sharpes (mean/median) — no cross-fold re-application
+      3) Aggregate fold OOS Sharpes (mean/median) -- no cross-fold re-application
       4) Re-search final params on all pre-rolling-OOS data; gate once on rolling OOS
-         (empty / reused window → fail-closed: best_params=None)
+         (empty / reused window -> fail-closed: best_params=None)
       5) Rolling OOS results are not written to SKILL / Maker / Checker feedback
     """
 
@@ -119,7 +119,7 @@ class IntelligenceLoop:
             llm_out = self._run_llm(df)
             if llm_out.best_params is not None:
                 return llm_out
-            logger.warning("LLM path produced no accepted params → grid fallback")
+            logger.warning("LLM path produced no accepted params -> grid fallback")
             grid = self._run_grid(df)
             grid.path = "grid_fallback"
             grid.maker_proposed = llm_out.maker_proposed
@@ -127,7 +127,7 @@ class IntelligenceLoop:
             grid.rankings = llm_out.rankings + grid.rankings
             return grid
 
-        logger.warning("ANTHROPIC_API_KEY missing → grid optimizer only")
+        logger.warning("ANTHROPIC_API_KEY missing -> grid optimizer only")
         grid = self._run_grid(df)
         grid.path = "unavailable"
         return grid
@@ -252,7 +252,7 @@ class IntelligenceLoop:
         - Each WF fold picks params on its train window and is scored only on
           that fold's outer OOS (pure fold OOS).
         - ``outer_mean_sharpe`` / ``outer_median_sharpe`` aggregate those
-          fold-specific OOS scores — never re-apply one fold's winner to earlier
+          fold-specific OOS scores -- never re-apply one fold's winner to earlier
           OOS windows.
         - Final params are re-searched on all pre-rolling-OOS data, then gated
           once on a *new* rolling OOS window (bars after ``exclude_oos_before``).

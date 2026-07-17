@@ -24,16 +24,16 @@ def returns_pvalue(returns: pd.Series) -> float:
 
 
 def newey_west_lags(n: int, lags: int = 0) -> int:
-    """Bartlett / Newey–West lag length. ``lags<=0`` → automatic rule."""
+    """Bartlett / Newey-West lag length. ``lags<=0`` -> automatic rule."""
     n = max(1, int(n))
     if lags and lags > 0:
         return min(int(lags), n - 1)
-    # Newey–West automatic bandwidth (approx.)
+    # Newey-West automatic bandwidth (approx.)
     return int(max(1, min(n - 1, np.floor(4.0 * (n / 100.0) ** (2.0 / 9.0)))))
 
 
 def hac_mean_pvalue(returns: pd.Series, *, lags: int = 0) -> float:
-    """Two-sided p-value for H0: E[r]=0 using Newey–West (HAC) standard errors.
+    """Two-sided p-value for H0: E[r]=0 using Newey-West (HAC) standard errors.
 
     Accounts for serial correlation in bar PnL; does not assume IID observations.
     """
@@ -45,7 +45,7 @@ def hac_mean_pvalue(returns: pd.Series, *, lags: int = 0) -> float:
         return 1.0
     mu = float(r.mean())
     L = newey_west_lags(n, lags)
-    # γ0 + 2 Σ w_k γ_k  (Bartlett kernel)
+    # gamma0 + 2 Sum w_k gamma_k  (Bartlett kernel)
     demean = r - mu
     gamma0 = float(np.dot(demean, demean) / n)
     nw_var = gamma0
@@ -74,7 +74,7 @@ def circular_block_resample(
     """Concatenate fixed-length circular blocks and truncate to ``len(data)``.
 
     Each start index wraps with modulo ``n`` (Politis & Romano circular block
-    bootstrap), so every block has exactly ``block`` observations — unlike a
+    bootstrap), so every block has exactly ``block`` observations -- unlike a
     naive end-truncated slice that shortens blocks near the series tail.
     """
     x = np.asarray(data, dtype=float)
@@ -83,7 +83,7 @@ def circular_block_resample(
     if n == 0:
         return x.copy()
     starts = np.asarray(starts, dtype=int).reshape(-1)
-    # shape (n_blocks, block) → fixed-length indices with wrap-around
+    # shape (n_blocks, block) -> fixed-length indices with wrap-around
     idx = (starts[:, None] + np.arange(block, dtype=int)[None, :]) % n
     return x[idx.ravel()[:n]]
 
@@ -97,7 +97,7 @@ def moving_block_resample(
     """Concatenate fixed-length moving blocks (no wrap); truncate to ``len(data)``.
 
     ``starts`` must lie in ``[0, n - block]`` so each block is exactly ``block``
-    long (Künsch moving-block bootstrap).
+    long (Kunsch moving-block bootstrap).
     """
     x = np.asarray(data, dtype=float)
     n = len(x)
@@ -190,7 +190,7 @@ def trial_sharpe_dispersion(
 ) -> tuple[float, float]:
     """Cross-sectional mean and std of non-annualized Sharpes across trials.
 
-    This is the selection-bias scale ``σ_{{SR_n}}`` in Bailey & López de Prado —
+    This is the selection-bias scale ``sigma_{{SR_n}}`` in Bailey & Lopez de Prado --
     not the estimation SE of a single strategy's Sharpe.
     """
     arr = np.asarray(list(trial_sharpes), dtype=float)
@@ -212,7 +212,7 @@ def expected_max_sharpe(
     *,
     mean_sr: float = 0.0,
 ) -> float:
-    """Expected maximum Sharpe under multiple testing (Bailey & López de Prado).
+    """Expected maximum Sharpe under multiple testing (Bailey & Lopez de Prado).
 
     ``sr_trials_std`` is the **cross-trial** standard deviation of Sharpe ratios
     across the N candidates (selection-bias scale), not a single-strategy
@@ -223,7 +223,7 @@ def expected_max_sharpe(
     mu = float(mean_sr)
     if n <= 1 or sigma <= 0.0:
         return mu
-    emc = 0.5772156649015329  # Euler–Mascheroni
+    emc = 0.5772156649015329  # Euler-Mascheroni
     z1 = stats.norm.ppf(1.0 - 1.0 / n)
     z2 = stats.norm.ppf(1.0 - 1.0 / (n * np.e))
     if np.isnan(z1) or np.isnan(z2):
@@ -239,16 +239,16 @@ def deflated_sharpe_ratio(
     sr_trials_std: float | None = None,
     sr_trials_mean: float | None = None,
 ) -> tuple[float, float, float]:
-    """Deflated Sharpe Ratio (Bailey & López de Prado 2014).
+    """Deflated Sharpe Ratio (Bailey & Lopez de Prado 2014).
 
     Returns ``(dsr, sr_star, nonannual_sr)`` where
-    ``dsr = Φ[(SR − SR*) / √V̂[SR]]``.
+    ``dsr = Phi[(SR - SR*) / sqrt(V[SR])]``.
 
-    - ``√V̂[SR]``: estimation variance of *this* strategy's Sharpe (skew/kurt).
+    - ``sqrt(V[SR])``: estimation SE of *this* strategy's Sharpe (skew/kurt).
     - ``SR* = E[max SR_n]``: uses the **cross-trial** Sharpe dispersion
       (``trial_sharpes`` / ``sr_trials_std``). Under a homogeneous null with
-      no family provided, falls back to ``√V̂[SR]`` (same scale as independent
-      zero-true-SR estimators) — prefer passing the candidate family.
+      no family provided, falls back to ``sqrt(V[SR])`` (same scale as independent
+      zero-true-SR estimators) -- prefer passing the candidate family.
     """
     r = returns.fillna(0.0).to_numpy(dtype=float)
     n = len(r)
@@ -281,7 +281,7 @@ def deflated_sharpe_ratio(
         trials_std = max(0.0, float(sr_trials_std))
         mean_for_star = float(sr_trials_mean or 0.0)
     else:
-        # Homogeneous-null approximation: cross-section var ≈ estimation var.
+        # Homogeneous-null approximation: cross-section var ~= estimation var.
         trials_std = sr_se
         mean_for_star = float(sr_trials_mean or 0.0)
 
@@ -316,7 +316,7 @@ def probability_of_backtest_overfitting(
     """Probability of Backtest Overfitting via CSCV (Bailey et al.).
 
     ``returns_matrix`` is shape ``(T, N)`` with aligned bar returns for N trials.
-    Returns PBO in [0, 1] (higher = more overfit). Insufficient data → 1.0.
+    Returns PBO in [0, 1] (higher = more overfit). Insufficient data -> 1.0.
     """
     if returns_matrix.ndim != 2:
         return 1.0
@@ -360,8 +360,8 @@ def adjust_alpha(alpha: float, n_tests: int, method: str = "bonferroni") -> floa
     - ``none``: unadjusted ``alpha``
     - ``bonferroni`` / ``holm``: ``alpha / m`` (Holm needs ordered p's; this is the
       first-step / conservative per-comparison stand-in)
-    - ``fdr_bh``: returns unadjusted ``alpha``. True Benjamini–Hochberg needs the
-      full p-value family — use :func:`benjamini_hochberg_accept` after search.
+    - ``fdr_bh``: returns unadjusted ``alpha``. True Benjamini-Hochberg needs the
+      full p-value family -- use :func:`benjamini_hochberg_accept` after search.
       (Previously this incorrectly used ``alpha/m``, i.e. Bonferroni.)
     """
     a = max(0.0, float(alpha))
@@ -381,7 +381,7 @@ def benjamini_hochberg_accept(
     *,
     alpha: float = 0.05,
 ) -> list[bool]:
-    """Benjamini–Hochberg FDR control at level ``alpha``.
+    """Benjamini-Hochberg FDR control at level ``alpha``.
 
     Returns a boolean mask aligned with ``p_values`` (True = reject H0 / significant).
     """

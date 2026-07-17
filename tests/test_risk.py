@@ -60,10 +60,10 @@ def test_max_loss_lots_use_tick_value_not_notional():
         max_open_risk_fraction=1.0,
         kelly_min_trades=0,
     )
-    # full kelly = 0.6 - 0.4/2 = 0.4 → capped to 0.10
-    # equity 10_000 → risk_capital 1000
-    # stop = 1% of 40000 = 400; tick 1.0 value 1.0 → 400 loss/lot
-    # lots = 1000/400 = 2.5 → floor to 2.5 with step 0.01
+    # full kelly = 0.6 - 0.4/2 = 0.4 -> capped to 0.10
+    # equity 10_000 -> risk_capital 1000
+    # stop = 1% of 40000 = 400; tick 1.0 value 1.0 -> 400 loss/lot
+    # lots = 1000/400 = 2.5 -> floor to 2.5 with step 0.01
     decision = risk.position_lots(
         equity=10_000,
         price=40_000,
@@ -92,8 +92,8 @@ def test_open_risk_reduces_budget():
         max_open_risk_fraction=0.20,
         kelly_min_trades=0,
     )
-    # kelly budget = 0.2 * 10000 = 2000; open_risk 1500 → remaining 500
-    # stop dist 100 on price 10000; tick 1/1 → 100/lot → lots=5
+    # kelly budget = 0.2 * 10000 = 2000; open_risk 1500 -> remaining 500
+    # stop dist 100 on price 10000; tick 1/1 -> 100/lot -> lots=5
     decision = risk.position_lots(
         equity=10_000,
         price=10_000,
@@ -211,7 +211,7 @@ def test_cold_start_uses_fixed_fraction_not_default_kelly():
     frac, mode = risk.sizing_fraction()
     assert mode == "cold_start"
     assert abs(frac - 0.005) < 1e-12
-    # Half-Kelly on defaults would be ~0.10 before cap — must not be used yet.
+    # Half-Kelly on defaults would be ~0.10 before cap -- must not be used yet.
     assert risk.kelly_fraction() == 0.005  # capped
     assert not risk.kelly_ready()
 
@@ -247,7 +247,7 @@ def test_kelly_activates_after_min_trades():
     assert risk.kelly_ready()
     frac, mode = risk.sizing_fraction()
     assert mode == "kelly"
-    # Empirical W=0.6 R=2 → full Kelly = 0.4 capped to 0.10
+    # Empirical W=0.6 R=2 -> full Kelly = 0.4 capped to 0.10
     assert abs(frac - 0.10) < 1e-12
 
 

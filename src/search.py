@@ -38,20 +38,50 @@ def validation_ranking_row(
         "p_value": val.p_value,
         "ic": val.ic,
         "oos_degradation": val.oos_degradation,
+        "is_sharpe": val.is_sharpe,
+        "oos_sharpe": val.oos_sharpe,
         "overfitting": val.overfitting,
         "reasons": list(val.reasons),
         "flags": list(val.flags),
         "n_trades": val.n_trades,
         "oos_n_trades": val.oos_n_trades,
-        "regime_trades": val.regime_trades,
+        "regime_trades": dict(val.regime_trades or {}),
         "p_value_threshold": val.p_value_threshold,
         "dsr": val.dsr,
         "sr_star": val.sr_star,
         "hac_p_value": val.hac_p_value,
         "bootstrap_p_value": val.bootstrap_p_value,
+        "pbo": val.pbo,
     }
     row.update(extra)
     return row
+
+
+def validation_result_from_ranking(row: dict[str, Any]) -> ValidationResult:
+    """Rebuild a ValidationResult from a rankings row (post-gate promotion)."""
+    pbo = row.get("pbo")
+    return ValidationResult(
+        accepted=bool(row.get("accepted")),
+        reasons=list(row.get("reasons") or []),
+        flags=list(row.get("flags") or []),
+        sharpe=float(row.get("sharpe") or 0.0),
+        max_drawdown=float(row.get("max_drawdown") or 0.0),
+        p_value=float(row.get("p_value") or 1.0),
+        ic=float(row.get("ic") or 0.0),
+        oos_degradation=float(row.get("oos_degradation") or 0.0),
+        is_sharpe=float(row.get("is_sharpe") or 0.0),
+        oos_sharpe=float(row.get("oos_sharpe") or 0.0),
+        overfitting=bool(row.get("overfitting")),
+        n_trades=int(row.get("n_trades") or 0),
+        oos_n_trades=int(row.get("oos_n_trades") or 0),
+        regime_trades=dict(row.get("regime_trades") or {}),
+        p_value_threshold=float(row.get("p_value_threshold") or 0.05),
+        dsr=float(row.get("dsr") or 0.0),
+        sr_star=float(row.get("sr_star") or 0.0),
+        hac_p_value=float(row.get("hac_p_value") or 1.0),
+        bootstrap_p_value=float(row.get("bootstrap_p_value") or 1.0),
+        pbo=float(pbo) if pbo is not None else None,
+    )
 
 
 def compute_search_pbo(
@@ -82,14 +112,22 @@ def _survivors_by_sharpe(rankings: list[dict[str, Any]]) -> list[dict[str, Any]]
     )
 
 
+def _ranking_for_params(
+    rankings: list[dict[str, Any]],
+    params: Optional[StrategyParams],
+) -> Optional[dict[str, Any]]:
+    if params is None:
+        return None
+    bp = params.as_dict()
+    return next((r for r in rankings if r.get("params") == bp), None)
+
+
 def _best_still_accepted(
     best_params: Optional[StrategyParams],
     rankings: list[dict[str, Any]],
 ) -> bool:
-    if best_params is None:
-        return False
-    bp = best_params.as_dict()
-    return any(r.get("params") == bp and r.get("accepted") for r in rankings)
+    row = _ranking_for_params(rankings, best_params)
+    return bool(row is not None and row.get("accepted"))
 
 
 def _resync_best_after_gate(
@@ -97,25 +135,35 @@ def _resync_best_after_gate(
     best_params: Optional[StrategyParams],
     best_val: Optional[ValidationResult],
     rankings: list[dict[str, Any]],
-    reject_best_val: bool = True,
-    clear_best_val_on_promote: bool = False,
 ) -> SearchBest:
-    """Keep or replace the search winner after a family-wide gate mutates rankings."""
+    """Keep or replace the search winner after a family-wide gate mutates rankings.
+
+    On promotion, rebuild ``best_val`` from the survivor ranking row so
+    ``best_params`` and ``best_validation`` always describe the same candidate.
+    """
     new_accepted = _accepted_count(rankings)
     if _best_still_accepted(best_params, rankings):
-        return best_params, best_val, new_accepted
+        row = _ranking_for_params(rankings, best_params)
+        assert row is not None
+        return best_params, validation_result_from_ranking(row), new_accepted
 
-    if reject_best_val and best_val is not None:
+    # Previous winner rejected -- keep its (updated) row for diagnostics only.
+    rejected_row = _ranking_for_params(rankings, best_params)
+    rejected_val: Optional[ValidationResult]
+    if rejected_row is not None:
+        rejected_val = validation_result_from_ranking(rejected_row)
+    elif best_val is not None:
         best_val.accepted = False
+        rejected_val = best_val
+    else:
+        rejected_val = None
 
     survivors = _survivors_by_sharpe(rankings)
     if not survivors:
-        return None, best_val, 0
+        return None, rejected_val, 0
+
     top = survivors[0]
-    promoted = StrategyParams(**top["params"])
-    if clear_best_val_on_promote:
-        return promoted, None, new_accepted
-    return promoted, best_val, new_accepted
+    return StrategyParams(**top["params"]), validation_result_from_ranking(top), new_accepted
 
 
 def _append_unique(items: list[str], msg: str) -> None:
@@ -131,7 +179,7 @@ def apply_fdr_bh_gate(
     accepted_count: int,
     rankings: list[dict[str, Any]],
 ) -> SearchBest:
-    """Apply Benjamini–Hochberg FDR across the search family's p-values.
+    """Apply Benjamini-Hochberg FDR across the search family's p-values.
 
     When ``multiple_testing=fdr_bh``, per-candidate validation defers the p-gate;
     this post-pass rejects candidates whose p fails BH at ``p_value_max``.
@@ -158,20 +206,10 @@ def apply_fdr_bh_gate(
             flags.append("fdr_bh_gate")
         row["flags"] = flags
 
-    if best_val is not None and best_params is not None and not _best_still_accepted(
-        best_params, rankings
-    ):
-        msg = f"p_value {best_val.p_value:.4f} {reason_tail}"
-        _append_unique(best_val.reasons, msg)
-        if "fdr_bh_gate" not in best_val.flags:
-            best_val.flags.append("fdr_bh_gate")
-
     return _resync_best_after_gate(
         best_params=best_params,
         best_val=best_val,
         rankings=rankings,
-        reject_best_val=True,
-        clear_best_val_on_promote=False,
     )
 
 
@@ -187,7 +225,7 @@ def apply_dsr_family_gate(
     """Recompute DSR with cross-trial Sharpe dispersion and enforce ``min_dsr``.
 
     Per-candidate validation defers the DSR gate when ``n_tests>1`` because SR*
-    requires the family-wide ``σ_{SR_n}``, not a single strategy's estimation SE.
+    requires the family-wide ``sigma_{SR_n}``, not a single strategy's estimation SE.
     """
     cfg = validator.config
     if cfg.min_dsr <= 0 or not rankings or not return_series:
@@ -235,41 +273,10 @@ def apply_dsr_family_gate(
         row["flags"] = flags
         row["reasons"] = reasons
 
-    if best_val is not None and best_params is not None:
-        bp = best_params.as_dict()
-        match_i = next(
-            (i for i in range(n) if rankings[i].get("params") == bp),
-            None,
-        )
-        if match_i is not None:
-            best_val.dsr = float(rankings[match_i].get("dsr") or 0.0)
-            best_val.sr_star = float(rankings[match_i].get("sr_star") or 0.0)
-            best_val.flags = [
-                f for f in best_val.flags if f != "dsr_gate_deferred_family"
-            ]
-            if "dsr_family_applied" not in best_val.flags:
-                best_val.flags.append("dsr_family_applied")
-            best_val.reasons = [
-                r
-                for r in best_val.reasons
-                if not str(r).startswith("deflated_sharpe ")
-            ]
-            if best_val.dsr < cfg.min_dsr:
-                best_val.reasons.append(
-                    f"deflated_sharpe {best_val.dsr:.4f} < {cfg.min_dsr} "
-                    f"(sr_star={best_val.sr_star:.6f}, n_trials={n_trials}, "
-                    f"sr_trials_std={trials_std:.6f})"
-                )
-                if "dsr_gate" not in best_val.flags:
-                    best_val.flags.append("dsr_gate")
-                best_val.accepted = False
-
     return _resync_best_after_gate(
         best_params=best_params,
         best_val=best_val,
         rankings=rankings,
-        reject_best_val=False,
-        clear_best_val_on_promote=True,
     )
 
 
@@ -333,7 +340,7 @@ def apply_search_family_gates(
     rankings: list[dict[str, Any]],
     return_series: list[pd.Series],
 ) -> tuple[Optional[StrategyParams], Optional[ValidationResult], int, Optional[float]]:
-    """Run FDR → DSR(family) → PBO post-passes shared by grid and LLM search."""
+    """Run FDR -> DSR(family) -> PBO post-passes shared by grid and LLM search."""
     best_params, best_val, accepted_count = apply_fdr_bh_gate(
         validator=validator,
         best_params=best_params,
