@@ -9,7 +9,7 @@ from typing import Any, Optional
 
 import pandas as pd
 
-from .backtest import Backtester
+from .backtest import Backtester, FillModel
 from .connection import MT5Connection
 from .data import DataFeed
 from .execution import OrderExecutor
@@ -365,7 +365,10 @@ class SymbolTrader:
         if df is None:
             return {"ok": False, "error": "no history"}
         cost = self.cost_model()
-        bt = Backtester(cost_model=cost)
+        bt = Backtester(
+            cost_model=cost,
+            fill_model=FillModel.from_config(self.app_config.get("backtest")),
+        )
         from .validator import ValidatorConfig
 
         vcfg = self.app_config.get("validator", {})

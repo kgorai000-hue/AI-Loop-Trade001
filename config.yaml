@@ -48,6 +48,12 @@ risk:
   max_margin_fraction: 0.50     # free-margin usage cap
   rebalance_band: 0.15          # same-side lot drift ignored below 15%; else delta only
 
+backtest:
+  limit_fills: true             # require OHLC touch for entries (live-aligned)
+  limit_ttl_bars: 2             # cancel unfilled limits after N bars
+  slippage_bps: 1.0             # adverse slippage on limit fill / market exit
+  limit_offset_bps: 0.0         # place limit this far inside the signal close
+
 validator:
   lookback_months: 6
   max_drawdown: 0.10
