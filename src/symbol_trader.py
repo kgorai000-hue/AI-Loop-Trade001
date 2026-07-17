@@ -75,6 +75,9 @@ class SymbolTrader:
         self.feed = DataFeed(connection, symbol_cfg.name, symbol_cfg.timeframe)
         self._last_bar_time = None
         self._regime_counts = {"trend": 0, "mean_reversion": 0, "unknown": 0}
+        history = self.store.read_state().get("recent_pnls") or []
+        if isinstance(history, list) and history:
+            self.risk.load_trade_history(history)
 
     @property
     def symbol(self) -> str:
@@ -206,6 +209,7 @@ class SymbolTrader:
                 magic=self.MAGIC,
             )
             result["order"] = reconciliation.as_dict()
+            self._record_closed_trades(reconciliation)
             self.sync_account_state()
             return result
 
@@ -216,17 +220,46 @@ class SymbolTrader:
             return result
 
         price = float(tick.ask if target_signal == Signal.LONG else tick.bid)
-        lots = self.risk.position_lots(
+        point = float(getattr(info, "point", 0.01) or 0.01)
+        tick_size = float(getattr(info, "trade_tick_size", 0) or 0) or point
+        tick_value = float(getattr(info, "trade_tick_value", 0) or 0)
+        digits = int(getattr(info, "digits", 2) or 2)
+        free_margin = float(getattr(account, "margin_free", 0) or 0)
+        margin_per_lot = self._margin_per_lot(target_signal, price)
+        open_risk = self._open_risk_reserved(price=price, tick_size=tick_size, tick_value=tick_value)
+
+        decision_lots = self.risk.position_lots(
             equity=float(account.equity),
             price=price,
             contract_size=float(getattr(info, "trade_contract_size", 1) or 1),
             volume_step=volume_step,
             volume_min=float(getattr(info, "volume_min", 0.01) or 0.01),
             volume_max=float(getattr(info, "volume_max", 5) or 5),
+            tick_size=tick_size,
+            tick_value=tick_value,
+            point=point,
+            side_long=target_signal == Signal.LONG,
+            digits=digits,
+            free_margin=free_margin if free_margin > 0 else None,
+            margin_per_lot=margin_per_lot,
+            open_risk=open_risk,
         )
+        lots = decision_lots.lots
         result["lots"] = lots
+        result["lot_decision"] = {
+            "stop_loss": decision_lots.stop_loss,
+            "stop_distance": decision_lots.stop_distance,
+            "risk_capital": decision_lots.risk_capital,
+            "risk_per_lot": decision_lots.risk_per_lot,
+            "open_risk_reserved": decision_lots.open_risk_reserved,
+            "margin_capped": decision_lots.margin_capped,
+            "message": decision_lots.message,
+        }
         if lots <= 0:
-            result["order"] = {"ok": False, "message": "kelly lots=0"}
+            result["order"] = {"ok": False, "message": f"lots=0 ({decision_lots.message})"}
+            return result
+        if decision_lots.stop_loss is None:
+            result["order"] = {"ok": False, "message": "stop loss required but not computed"}
             return result
 
         reconciliation = self.executor.reconcile_target(
@@ -236,10 +269,67 @@ class SymbolTrader:
             volume_step=volume_step,
             comment=f"lr_{decision.regime[:8]}",
             magic=self.MAGIC,
+            sl=decision_lots.stop_loss,
         )
         result["order"] = reconciliation.as_dict()
+        self._record_closed_trades(reconciliation)
         self.sync_account_state()
         return result
+
+    def _margin_per_lot(self, side: Signal, price: float) -> Optional[float]:
+        try:
+            import MetaTrader5 as mt5
+
+            order_type = mt5.ORDER_TYPE_BUY if side == Signal.LONG else mt5.ORDER_TYPE_SELL
+            margin = mt5.order_calc_margin(order_type, self.symbol, 1.0, float(price))
+            if margin is None:
+                return None
+            value = float(margin)
+            return value if value > 0 else None
+        except Exception:
+            logger.debug("%s order_calc_margin unavailable", self.symbol, exc_info=True)
+            return None
+
+    def _open_risk_reserved(self, *, price: float, tick_size: float, tick_value: float) -> float:
+        positions = self.executor.managed_positions(self.symbol, magic=self.MAGIC)
+        if positions is None:
+            logger.warning("%s: open risk unknown (positions_get failed)", self.symbol)
+            return float("inf")
+        if not positions:
+            return 0.0
+        import MetaTrader5 as mt5
+
+        info = self.connection.symbol_info(self.symbol)
+        point = float(getattr(info, "point", 0.01) or 0.01) if info is not None else 0.01
+        fallback = self.risk.stop_distance_price(price, point) * max(
+            1.0, float(self.risk.gap_buffer_mult)
+        )
+        total = 0.0
+        for p in positions:
+            side_long = p.type == mt5.POSITION_TYPE_BUY
+            sl_raw = float(getattr(p, "sl", 0) or 0)
+            sl = sl_raw if sl_raw > 0 else None
+            total += self.risk.estimate_position_open_risk(
+                volume=float(p.volume),
+                current_price=price,
+                side_long=side_long,
+                stop_loss=sl,
+                tick_size=tick_size,
+                tick_value=tick_value,
+                fallback_stop_distance=fallback,
+            )
+        return total
+
+    def _record_closed_trades(self, reconciliation: Any) -> None:
+        recorded = False
+        for order in getattr(reconciliation, "orders", []) or []:
+            pnl = getattr(order, "closed_pnl", None)
+            if pnl is None or getattr(order, "dry_run", False) or not getattr(order, "ok", False):
+                continue
+            self.risk.record_trade(float(pnl))
+            recorded = True
+        if recorded:
+            self.store.update_state(recent_pnls=list(self.risk.recent_pnls))
 
     def on_new_bar(self) -> Optional[dict[str, Any]]:
         """Run once for each newly completed bar."""

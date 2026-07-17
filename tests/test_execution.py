@@ -19,7 +19,7 @@ class Connection:
         return SimpleNamespace(trade_mode=self.trade_mode)
 
     def symbol_info(self, symbol):
-        return SimpleNamespace(digits=1, point=0.1, filling_mode=2)
+        return SimpleNamespace(digits=1, point=0.1, filling_mode=2, trade_stops_level=0)
 
 
 def _position(side, volume=1.0, ticket=42, magic=260717):
@@ -127,6 +127,38 @@ def test_reversal_closes_exact_ticket_before_new_entry(monkeypatch):
     assert sent[1]["action"] == mt5.TRADE_ACTION_PENDING
     assert sent[1]["type"] == mt5.ORDER_TYPE_SELL_LIMIT
     assert "awaiting fill" in result.message
+
+
+def test_place_limit_includes_stop_loss(monkeypatch):
+    sent = []
+    monkeypatch.setattr(mt5, "positions_get", lambda **kwargs: [])
+    monkeypatch.setattr(mt5, "orders_get", lambda **kwargs: [])
+    monkeypatch.setattr(
+        mt5,
+        "symbol_info_tick",
+        lambda symbol: SimpleNamespace(bid=40000.0, ask=40001.0),
+    )
+
+    def order_send(request):
+        sent.append(request)
+        return SimpleNamespace(
+            retcode=mt5.TRADE_RETCODE_DONE,
+            order=1,
+            deal=2,
+            comment="done",
+        )
+
+    monkeypatch.setattr(mt5, "order_send", order_send)
+    executor = OrderExecutor(Connection(), execute=True, account_type="demo")
+    result = executor.reconcile_target(
+        symbol="#US30",
+        side=Signal.LONG,
+        volume=1.0,
+        sl=39500.0,
+    )
+
+    assert result.ok is True
+    assert sent[-1]["sl"] == 39500.0
 
 
 def test_positions_get_none_does_not_open_as_flat(monkeypatch):

@@ -23,6 +23,7 @@ class OrderRequest:
     comment: str = "lr_loop"
     deviation: int = 20
     magic: int = 260717
+    sl: Optional[float] = None
 
 
 @dataclass
@@ -34,6 +35,7 @@ class OrderResult:
     message: str = ""
     dry_run: bool = False
     request: Optional[dict] = None
+    closed_pnl: Optional[float] = None
 
 
 @dataclass
@@ -59,6 +61,7 @@ class ReconcileResult:
                     "message": o.message,
                     "dry_run": o.dry_run,
                     "request": o.request,
+                    "closed_pnl": o.closed_pnl,
                 }
                 for o in self.orders
             ],
@@ -233,6 +236,21 @@ class OrderExecutor:
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": self._filling_mode(info),
         }
+        if req.sl is not None and float(req.sl) > 0:
+            sl = float(req.sl)
+            stops_level = int(getattr(info, "trade_stops_level", 0) or 0)
+            point = float(getattr(info, "point", 0) or 0)
+            min_dist = stops_level * point if stops_level > 0 and point > 0 else 0.0
+            if side == Signal.LONG and sl >= price:
+                return OrderResult(ok=False, message=f"long SL {sl} must be below price {price}")
+            if side == Signal.SHORT and sl <= price:
+                return OrderResult(ok=False, message=f"short SL {sl} must be above price {price}")
+            if min_dist > 0 and abs(price - sl) < min_dist:
+                return OrderResult(
+                    ok=False,
+                    message=f"SL distance {abs(price - sl)} < stops_level min {min_dist}",
+                )
+            request["sl"] = sl
 
         if not allowed:
             logger.info("DRY-RUN order skipped (%s): %s", reason, request)
@@ -352,6 +370,13 @@ class OrderExecutor:
             )
         return None
 
+    @staticmethod
+    def _position_closed_pnl(position: Any) -> float:
+        profit = float(getattr(position, "profit", 0.0) or 0.0)
+        swap = float(getattr(position, "swap", 0.0) or 0.0)
+        commission = float(getattr(position, "commission", 0.0) or 0.0)
+        return profit + swap + commission
+
     def close_position_market(self, position: Any, magic: int = 260717) -> OrderResult:
         """Close one exact MT5 position ticket using a market deal."""
         allowed, reason = self.can_execute()
@@ -363,6 +388,7 @@ class OrderExecutor:
         if tick is None or info is None:
             return OrderResult(ok=False, message="missing tick/info")
 
+        closed_pnl = self._position_closed_pnl(position)
         is_buy = position.type == mt5.POSITION_TYPE_BUY
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
@@ -378,8 +404,17 @@ class OrderExecutor:
         }
         if not allowed:
             logger.info("DRY-RUN close skipped (%s): %s", reason, request)
-            return OrderResult(ok=True, message=f"dry-run close: {reason}", dry_run=True, request=request)
-        return self._send(request, "close")
+            return OrderResult(
+                ok=True,
+                message=f"dry-run close: {reason}",
+                dry_run=True,
+                request=request,
+                closed_pnl=closed_pnl,
+            )
+        result = self._send(request, "close")
+        if result.ok:
+            result.closed_pnl = closed_pnl
+        return result
 
     def close_managed_positions(
         self, symbol: str, magic: int = 260717
@@ -399,6 +434,7 @@ class OrderExecutor:
         volume_step: float = 0.01,
         comment: str = "lr_loop",
         magic: int = 260717,
+        sl: Optional[float] = None,
     ) -> ReconcileResult:
         """Move managed positions toward one desired side/volume without stacking.
 
@@ -548,6 +584,7 @@ class OrderExecutor:
                 price=0.0,
                 comment=comment,
                 magic=magic,
+                sl=sl,
             )
         )
         if entry.ok:

@@ -35,6 +35,7 @@ for name, value in {
     setattr(mt5, name, value)
 
 for name in (
+    "order_calc_margin",
     "copy_rates_from_pos",
     "copy_rates_range",
     "symbol_info_tick",

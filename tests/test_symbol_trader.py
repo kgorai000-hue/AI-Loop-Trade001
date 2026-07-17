@@ -33,15 +33,43 @@ class Connection:
             volume_min=0.01,
             volume_max=5.0,
             trade_contract_size=1.0,
+            point=0.1,
+            trade_tick_size=0.1,
+            trade_tick_value=1.0,
+            digits=1,
+            trade_stops_level=0,
         )
 
     def account_info(self):
-        return SimpleNamespace(equity=1000.0, margin=0.0)
+        return SimpleNamespace(equity=1000.0, margin=0.0, margin_free=1000.0)
 
 
 class Risk:
     def position_lots(self, **kwargs):
-        return 1.0
+        from src.risk import LotDecision
+
+        return LotDecision(
+            lots=1.0,
+            stop_loss=95.0,
+            stop_distance=5.0,
+            risk_capital=10.0,
+            risk_per_lot=10.0,
+            message="test",
+        )
+
+    def load_trade_history(self, pnls):
+        pass
+
+    def record_trade(self, pnl):
+        pass
+
+    def stop_distance_price(self, price, point=0.01):
+        return price * 0.005
+
+    gap_buffer_mult = 1.25
+
+    def estimate_position_open_risk(self, **kwargs):
+        return 0.0
 
 
 class Feed:
@@ -67,7 +95,7 @@ class Executor:
 
     def reconcile_target(self, **kwargs):
         self.targets.append(kwargs)
-        return SimpleNamespace(as_dict=lambda: {"ok": True, "action": "test"})
+        return SimpleNamespace(as_dict=lambda: {"ok": True, "action": "test"}, orders=[])
 
 
 def _trader(frame, positions=None):
@@ -105,6 +133,7 @@ def test_on_new_bar_uses_same_completed_bar_for_detection_and_decision():
     assert trader.feed.calls == [1, 8]
     assert output["bar_time"] == str(frame["time"].iloc[-1])
     assert executor.targets[-1]["side"] == Signal.LONG
+    assert executor.targets[-1]["sl"] == 95.0
 
 
 def test_max_hold_forces_flat_target():

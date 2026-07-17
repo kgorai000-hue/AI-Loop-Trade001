@@ -53,6 +53,15 @@ class LoopEngine:
             min_lots=float(risk_cfg.get("min_lots", 0.01)),
             lookback_trades=int(risk_cfg.get("lookback_trades", 50)),
             min_cost_bps=float(risk_cfg.get("min_cost_bps", 10)),
+            stop_pct=float(risk_cfg.get("stop_pct", 0.005)),
+            stop_points=(
+                float(risk_cfg["stop_points"])
+                if risk_cfg.get("stop_points") is not None
+                else None
+            ),
+            gap_buffer_mult=float(risk_cfg.get("gap_buffer_mult", 1.25)),
+            max_open_risk_fraction=float(risk_cfg.get("max_open_risk_fraction", 0.25)),
+            max_margin_fraction=float(risk_cfg.get("max_margin_fraction", 0.50)),
         )
         loop_cfg = config.get("loop", {})
         self.poll_seconds = int(loop_cfg.get("poll_seconds", 30))

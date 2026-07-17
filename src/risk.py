@@ -1,4 +1,4 @@
-"""Half-Kelly position sizing and trading cost model."""
+"""Half-Kelly position sizing from max loss at stop, plus cost model."""
 
 from __future__ import annotations
 
@@ -32,7 +32,6 @@ class CostModel:
             and self.price
             and self.price > 0
         ):
-            # MT5 spread is typically in points; cost ≈ spread * point / price
             spread_frac = (self.spread_points * self.point) / self.price
             parts.append(spread_frac)
 
@@ -76,12 +75,8 @@ class CostModel:
         if price is None:
             price = float(getattr(symbol_info, "bid", 0) or getattr(symbol_info, "ask", 0) or 0)
 
-        # Commission fields vary by broker; try common attributes
         commission = None
-        for attr in ("trade_commission", "commission", "trade_tick_value"):
-            # Prefer explicit commission if present; skip tick_value misuse
-            if attr == "trade_tick_value":
-                continue
+        for attr in ("trade_commission", "commission"):
             val = getattr(symbol_info, attr, None)
             if val is not None:
                 try:
@@ -108,6 +103,20 @@ class CostModel:
 
 
 @dataclass
+class LotDecision:
+    """Sized position with explicit stop and risk accounting."""
+
+    lots: float
+    stop_loss: Optional[float]
+    stop_distance: float
+    risk_capital: float
+    risk_per_lot: float
+    open_risk_reserved: float = 0.0
+    margin_capped: bool = False
+    message: str = ""
+
+
+@dataclass
 class RiskManager:
     half_kelly: bool = True
     default_win_rate: float = 0.52
@@ -117,6 +126,11 @@ class RiskManager:
     min_lots: float = 0.01
     lookback_trades: int = 50
     min_cost_bps: float = 10.0
+    stop_pct: float = 0.005
+    stop_points: Optional[float] = None
+    gap_buffer_mult: float = 1.25
+    max_open_risk_fraction: float = 0.25
+    max_margin_fraction: float = 0.50
     recent_pnls: list[float] = field(default_factory=list)
 
     def record_trade(self, pnl: float) -> None:
@@ -124,11 +138,14 @@ class RiskManager:
         if len(self.recent_pnls) > self.lookback_trades * 2:
             self.recent_pnls = self.recent_pnls[-self.lookback_trades :]
 
+    def load_trade_history(self, pnls: list[float]) -> None:
+        self.recent_pnls = [float(p) for p in pnls][-self.lookback_trades * 2 :]
+
     def estimate_wr_rr(self) -> tuple[float, float]:
         pnls = self.recent_pnls[-self.lookback_trades :]
         if len(pnls) < 5:
             return self.default_win_rate, self.default_reward_risk
-        arr = [p for p in pnls]
+        arr = list(pnls)
         wins = [p for p in arr if p > 0]
         losses = [p for p in arr if p < 0]
         wr = len(wins) / len(arr)
@@ -138,7 +155,9 @@ class RiskManager:
         rr = max(0.1, rr)
         return float(wr), float(rr)
 
-    def kelly_fraction(self, win_rate: Optional[float] = None, reward_risk: Optional[float] = None) -> float:
+    def kelly_fraction(
+        self, win_rate: Optional[float] = None, reward_risk: Optional[float] = None
+    ) -> float:
         """f* = W - (1-W)/R ; half-Kelly = 0.5 * f*."""
         w = self.default_win_rate if win_rate is None else win_rate
         r = self.default_reward_risk if reward_risk is None else reward_risk
@@ -148,6 +167,65 @@ class RiskManager:
         frac = 0.5 * full if self.half_kelly else full
         frac = max(0.0, min(frac, self.max_fraction))
         return float(frac)
+
+    def stop_distance_price(self, price: float, point: float = 0.01) -> float:
+        """Price distance from entry to stop (before gap buffer)."""
+        if self.stop_points is not None and self.stop_points > 0 and point > 0:
+            return float(self.stop_points) * float(point)
+        if price <= 0 or self.stop_pct <= 0:
+            return 0.0
+        return float(price) * float(self.stop_pct)
+
+    @staticmethod
+    def loss_per_lot(
+        stop_distance: float,
+        tick_size: float,
+        tick_value: float,
+    ) -> float:
+        """Account-currency loss for one lot if price moves ``stop_distance`` against us.
+
+        Uses MT5 ``trade_tick_value`` / ``trade_tick_size`` so FX conversion is
+        already embedded when the terminal reports deposit-currency tick value.
+        """
+        if stop_distance <= 0 or tick_size <= 0 or tick_value <= 0:
+            return 0.0
+        return (stop_distance / tick_size) * tick_value
+
+    @staticmethod
+    def estimate_position_open_risk(
+        *,
+        volume: float,
+        current_price: float,
+        side_long: bool,
+        stop_loss: Optional[float],
+        tick_size: float,
+        tick_value: float,
+        fallback_stop_distance: float,
+    ) -> float:
+        """Reserved max-loss for an open position (SL distance or fallback stop)."""
+        if volume <= 0:
+            return 0.0
+        if stop_loss is not None and stop_loss > 0 and current_price > 0:
+            if side_long:
+                dist = max(0.0, current_price - float(stop_loss))
+            else:
+                dist = max(0.0, float(stop_loss) - current_price)
+        else:
+            dist = fallback_stop_distance
+        return volume * RiskManager.loss_per_lot(dist, tick_size, tick_value)
+
+    def stop_loss_price(
+        self,
+        *,
+        side_long: bool,
+        entry_price: float,
+        stop_distance: float,
+        digits: int = 2,
+    ) -> Optional[float]:
+        if entry_price <= 0 or stop_distance <= 0:
+            return None
+        raw = entry_price - stop_distance if side_long else entry_price + stop_distance
+        return float(round(raw, digits))
 
     def position_lots(
         self,
@@ -159,10 +237,29 @@ class RiskManager:
         volume_max: Optional[float] = None,
         win_rate: Optional[float] = None,
         reward_risk: Optional[float] = None,
-    ) -> float:
-        """Convert Kelly fraction of equity into lot size."""
-        if equity <= 0 or price <= 0 or contract_size <= 0:
-            return 0.0
+        *,
+        tick_size: Optional[float] = None,
+        tick_value: Optional[float] = None,
+        point: Optional[float] = None,
+        side_long: bool = True,
+        digits: int = 2,
+        free_margin: Optional[float] = None,
+        margin_per_lot: Optional[float] = None,
+        open_risk: float = 0.0,
+    ) -> LotDecision:
+        """Size lots from Kelly risk capital / max loss at (gap-buffered) stop."""
+        empty = LotDecision(
+            lots=0.0,
+            stop_loss=None,
+            stop_distance=0.0,
+            risk_capital=0.0,
+            risk_per_lot=0.0,
+            open_risk_reserved=max(0.0, float(open_risk)),
+            message="invalid inputs",
+        )
+        if equity <= 0 or price <= 0:
+            return empty
+
         if win_rate is None or reward_risk is None:
             ew, er = self.estimate_wr_rr()
             win_rate = win_rate if win_rate is not None else ew
@@ -170,22 +267,99 @@ class RiskManager:
 
         frac = self.kelly_fraction(win_rate, reward_risk)
         if frac <= 0:
-            return 0.0
+            return LotDecision(
+                lots=0.0,
+                stop_loss=None,
+                stop_distance=0.0,
+                risk_capital=0.0,
+                risk_per_lot=0.0,
+                open_risk_reserved=max(0.0, float(open_risk)),
+                message="kelly fraction=0",
+            )
 
-        risk_capital = equity * frac
-        notional_per_lot = price * contract_size
-        raw_lots = risk_capital / notional_per_lot
+        point_v = float(point) if point and point > 0 else 0.01
+        base_stop = self.stop_distance_price(price, point_v)
+        stop_distance = base_stop * max(1.0, float(self.gap_buffer_mult))
+        sl = self.stop_loss_price(
+            side_long=side_long,
+            entry_price=price,
+            stop_distance=stop_distance,
+            digits=digits,
+        )
+
+        kelly_budget = equity * frac
+        open_reserved = max(0.0, float(open_risk))
+        total_cap = equity * float(self.max_open_risk_fraction)
+        risk_capital = min(kelly_budget, max(0.0, total_cap - open_reserved))
+
+        ts = float(tick_size) if tick_size and tick_size > 0 else 0.0
+        tv = float(tick_value) if tick_value and tick_value > 0 else 0.0
+        risk_per_lot = self.loss_per_lot(stop_distance, ts, tv)
+
+        if risk_per_lot > 0 and risk_capital > 0:
+            raw_lots = risk_capital / risk_per_lot
+            mode = "max_loss"
+        elif contract_size > 0:
+            notional_per_lot = price * contract_size
+            raw_lots = kelly_budget / notional_per_lot if notional_per_lot > 0 else 0.0
+            mode = "notional_fallback"
+            logger.warning(
+                "position_lots using notional fallback (tick_size/value missing); "
+                "stop-based risk unavailable"
+            )
+        else:
+            return LotDecision(
+                lots=0.0,
+                stop_loss=sl,
+                stop_distance=stop_distance,
+                risk_capital=risk_capital,
+                risk_per_lot=0.0,
+                open_risk_reserved=open_reserved,
+                message="cannot size: missing tick value/size and contract",
+            )
 
         vmin = volume_min if volume_min is not None else self.min_lots
         vmax = volume_max if volume_max is not None else self.max_lots
         vmax = min(vmax, self.max_lots)
         vmin = max(vmin, self.min_lots)
 
+        margin_capped = False
+        if (
+            free_margin is not None
+            and margin_per_lot is not None
+            and free_margin > 0
+            and margin_per_lot > 0
+        ):
+            margin_lots = (free_margin * float(self.max_margin_fraction)) / margin_per_lot
+            if margin_lots < raw_lots:
+                raw_lots = margin_lots
+                margin_capped = True
+
         lots = self._round_volume(raw_lots, volume_step)
         lots = max(0.0, min(lots, vmax))
         if 0 < lots < vmin:
-            lots = 0.0  # below minimum → skip trade
-        return float(lots)
+            lots = 0.0
+
+        msg = (
+            f"mode={mode} frac={frac:.4f} risk_cap={risk_capital:.2f} "
+            f"risk/lot={risk_per_lot:.2f} stop={stop_distance:.5f} "
+            f"open_risk={open_reserved:.2f}"
+        )
+        if margin_capped:
+            msg += " margin_capped"
+        if lots <= 0:
+            msg += " -> lots=0"
+
+        return LotDecision(
+            lots=float(lots),
+            stop_loss=sl if lots > 0 else None,
+            stop_distance=stop_distance,
+            risk_capital=risk_capital,
+            risk_per_lot=risk_per_lot,
+            open_risk_reserved=open_reserved,
+            margin_capped=margin_capped,
+            message=msg,
+        )
 
     @staticmethod
     def _round_volume(lots: float, step: float) -> float:

@@ -36,10 +36,16 @@ risk:
   min_cost_bps: 10          # 0.1% floor when MT5 cost unavailable
   default_win_rate: 0.52
   default_reward_risk: 1.5
-  max_fraction: 0.25        # hard cap on kelly fraction
+  max_fraction: 0.25        # hard cap on kelly fraction of equity risked
   max_lots: 5.0
   min_lots: 0.01
   lookback_trades: 50       # for empirical W / R estimation
+  # Max-loss sizing (stop distance → account-currency loss via tick_value)
+  stop_pct: 0.005           # 0.5% of price when stop_points is null
+  # stop_points: 100        # optional: distance in points (price/point units)
+  gap_buffer_mult: 1.25     # inflate stop for gap risk in sizing
+  max_open_risk_fraction: 0.25  # total open risk / equity
+  max_margin_fraction: 0.50     # free-margin usage cap
 
 validator:
   lookback_months: 6
