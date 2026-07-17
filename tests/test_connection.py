@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import MetaTrader5 as mt5
 
-from src.connection import MT5Connection
+from src.connection import MT5Connection, MT5InvokeTimeout
 
 
 def test_invoke_serializes_calls_across_threads(monkeypatch):
@@ -127,3 +127,84 @@ def test_ensure_reconnect_blocks_other_invokes(monkeypatch):
     assert done == ["ok"]
     assert "init_start" in order and "init_end" in order and "other_run" in order
     assert order.index("other_run") > order.index("init_end")
+
+
+def test_invoke_timeout_abandons_queued_job(monkeypatch):
+    """Timed-out jobs still in the queue must not execute (no late order_send)."""
+    conn = MT5Connection(invoke_timeout_sec=0.05)
+    conn.start()
+    started = threading.Event()
+    release = threading.Event()
+    ran_second = []
+
+    def blocker():
+        started.set()
+        release.wait(timeout=2.0)
+        return "blocked"
+
+    def second():
+        ran_second.append("ran")
+        return "second"
+
+    monkeypatch.setattr(mt5, "terminal_info", lambda: SimpleNamespace())
+    monkeypatch.setattr(mt5, "shutdown", lambda: None)
+
+    err_block = []
+
+    def run_block():
+        try:
+            conn.invoke(blocker)
+        except MT5InvokeTimeout as exc:
+            err_block.append(exc)
+
+    t_block = threading.Thread(target=run_block)
+    t_block.start()
+    assert started.wait(timeout=1.0)
+
+    err = None
+
+    def call_second():
+        nonlocal err
+        try:
+            conn.invoke(second)
+        except Exception as exc:  # noqa: BLE001
+            err = exc
+
+    t_second = threading.Thread(target=call_second)
+    t_second.start()
+    t_second.join(timeout=2.0)
+    release.set()
+    t_block.join(timeout=2.0)
+    # Allow worker to observe abandoned flag on the queued second job.
+    time.sleep(0.1)
+    conn.stop()
+
+    assert isinstance(err, MT5InvokeTimeout)
+    assert ran_second == []
+    assert err_block  # blocker itself also timed out while holding the worker
+
+
+def test_invoke_timeout_marks_in_flight_abandoned(monkeypatch):
+    conn = MT5Connection(invoke_timeout_sec=0.05)
+    conn.start()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow():
+        entered.set()
+        release.wait(timeout=2.0)
+        return "late"
+
+    monkeypatch.setattr(mt5, "terminal_info", lambda: SimpleNamespace())
+
+    err = None
+    try:
+        conn.invoke(slow)
+    except Exception as exc:  # noqa: BLE001
+        err = exc
+
+    assert entered.wait(timeout=1.0)
+    assert isinstance(err, MT5InvokeTimeout)
+    release.set()
+    time.sleep(0.1)
+    conn.stop()

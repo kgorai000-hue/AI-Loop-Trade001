@@ -16,6 +16,27 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
 
+class MT5InvokeTimeout(TimeoutError):
+    """Caller waited too long; the worker job may still run or was abandoned.
+
+    Treat order_send timeouts as *result unknown*, never as a clean failure
+    that is safe to auto-retry.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        fn_name: str,
+        abandoned: bool = True,
+        generation: int = 0,
+    ) -> None:
+        super().__init__(message)
+        self.fn_name = fn_name
+        self.abandoned = abandoned
+        self.generation = generation
+
+
 @dataclass
 class _MT5Job:
     fn: Callable[..., Any]
@@ -24,6 +45,8 @@ class _MT5Job:
     done: threading.Event = field(default_factory=threading.Event)
     result: Any = None
     error: Optional[BaseException] = None
+    abandoned: bool = False
+    generation: int = 0
 
 
 class MT5Connection:
@@ -54,6 +77,7 @@ class MT5Connection:
         self.reconnect_delay_sec = float(reconnect_delay_sec)
         self.invoke_timeout_sec = float(invoke_timeout_sec)
         self._connected = False
+        self._generation = 0
 
         self._jobs: queue.Queue[Optional[_MT5Job]] = queue.Queue()
         self._worker: Optional[threading.Thread] = None
@@ -97,18 +121,31 @@ class MT5Connection:
             self._worker = None
 
     def invoke(self, fn: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
-        """Run ``fn(*args, **kwargs)`` on the MT5 worker thread and return its result."""
+        """Run ``fn(*args, **kwargs)`` on the MT5 worker thread and return its result.
+
+        On timeout the specific job is marked ``abandoned``. If it has not started,
+        the worker skips it. If ``order_send`` is already running it cannot be
+        cancelled — callers must treat that as result-unknown and reconcile before
+        retrying (never auto-resend the same order).
+        """
         self.start()
         worker = self._worker
         if worker is not None and threading.current_thread() is worker:
             return fn(*args, **kwargs)
 
-        job = _MT5Job(fn=fn, args=args, kwargs=kwargs)
+        generation = self._generation
+        job = _MT5Job(fn=fn, args=args, kwargs=kwargs, generation=generation)
         self._jobs.put(job)
+        fn_name = getattr(fn, "__name__", repr(fn))
         if not job.done.wait(timeout=self.invoke_timeout_sec):
-            raise TimeoutError(
+            job.abandoned = True
+            raise MT5InvokeTimeout(
                 f"MT5 invoke timed out after {self.invoke_timeout_sec:.1f}s "
-                f"({getattr(fn, '__name__', repr(fn))})"
+                f"({fn_name}); job abandoned — treat order results as unknown "
+                f"until reconciled",
+                fn_name=str(fn_name),
+                abandoned=True,
+                generation=generation,
             )
         if job.error is not None:
             raise job.error
@@ -121,12 +158,34 @@ class MT5Connection:
                 if self._stop.is_set():
                     break
                 continue
+            fn_name = getattr(job.fn, "__name__", repr(job.fn))
+            # Abandoned before start: do not execute (avoids late order_send after
+            # the caller already timed out). Already-running jobs are not cancelled.
+            if job.abandoned:
+                logger.warning(
+                    "Skipping abandoned MT5 job fn=%s gen=%s",
+                    fn_name,
+                    job.generation,
+                )
+                job.done.set()
+                continue
             try:
                 job.result = job.fn(*job.args, **job.kwargs)
             except BaseException as exc:  # noqa: BLE001 — surface to caller
                 job.error = exc
             finally:
+                if job.abandoned:
+                    logger.warning(
+                        "MT5 job finished after caller timeout fn=%s error=%s",
+                        fn_name,
+                        job.error,
+                    )
                 job.done.set()
+
+    def bump_generation(self) -> int:
+        """Invalidate not-yet-started queued jobs (optional manual fence)."""
+        self._generation += 1
+        return self._generation
 
     def _connected_unlocked(self) -> bool:
         return self._connected and self._terminal_alive_unlocked()
@@ -271,6 +330,39 @@ class MT5Connection:
 
         return self.invoke(_op)
 
+    def history_deals_get(
+        self,
+        date_from: Any = None,
+        date_to: Any = None,
+        *,
+        group: Optional[str] = None,
+        ticket: Optional[int] = None,
+        position: Optional[int] = None,
+        order: Optional[int] = None,
+    ) -> Optional[tuple[Any, ...]]:
+        """Fetch deal history.
+
+        Prefer ``ticket`` / ``order`` / ``position`` lookups when available.
+        Date-range form remains for intent reconciliation scans.
+        """
+
+        def _op() -> Optional[tuple[Any, ...]]:
+            if not self._ensure_unlocked():
+                return None
+            if ticket is not None:
+                return mt5.history_deals_get(ticket=int(ticket))
+            if order is not None:
+                return mt5.history_deals_get(order=int(order))
+            if position is not None:
+                return mt5.history_deals_get(position=int(position))
+            if date_from is None or date_to is None:
+                return None
+            if group is None:
+                return mt5.history_deals_get(date_from, date_to)
+            return mt5.history_deals_get(date_from, date_to, group=group)
+
+        return self.invoke(_op)
+
     def last_error(self) -> Any:
         return self.invoke(mt5.last_error)
 
@@ -305,6 +397,28 @@ class MT5Connection:
                 return None
             value = float(margin)
             return value if value > 0 else None
+
+        return self.invoke(_op)
+
+    def order_calc_profit(
+        self,
+        order_type: int,
+        symbol: str,
+        volume: float,
+        price_open: float,
+        price_close: float,
+    ) -> Optional[float]:
+        """Deposit-currency PnL for a hypothetical fill; None if MT5 cannot compute."""
+
+        def _op() -> Optional[float]:
+            if not self._ensure_unlocked():
+                return None
+            profit = mt5.order_calc_profit(
+                order_type, symbol, volume, price_open, price_close
+            )
+            if profit is None:
+                return None
+            return float(profit)
 
         return self.invoke(_op)
 

@@ -28,7 +28,9 @@ class KillSwitchMonitor:
     Poll account equity; on drawdown breach (or locked STATE at startup),
     run a flatten state machine until positions and pending are both zero.
 
-    Unlock is manual only (STATE.locked = false).
+    Unlock is manual only (STATE.locked = false). When every STATE is unlocked
+    after ``LOCKED_AND_FLAT``, the monitor returns to IDLE and resumes DD checks
+    so trading never runs without kill-switch coverage.
     """
 
     def __init__(
@@ -116,6 +118,16 @@ class KillSwitchMonitor:
             self._reason,
         )
 
+    def _resume_after_manual_unlock(self) -> None:
+        """Return to IDLE when operator clears STATE.locked after LOCKED_AND_FLAT."""
+        logger.warning(
+            "KILL SWITCH resumed after manual unlock (was LOCKED_AND_FLAT); "
+            "equity drawdown monitoring active again"
+        )
+        self._phase = KillPhase.IDLE
+        self._reason = ""
+        self._on_trigger_fired = False
+
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
@@ -126,7 +138,11 @@ class KillSwitchMonitor:
 
     def _tick(self) -> None:
         if self._phase == KillPhase.LOCKED_AND_FLAT:
-            return
+            # Stay dormant only while STATE remains locked. Manual unlock must
+            # resume monitoring — otherwise the trade loop can run unprotected.
+            if self._any_locked():
+                return
+            self._resume_after_manual_unlock()
 
         if self._phase != KillPhase.IDLE:
             self._advance_flatten()

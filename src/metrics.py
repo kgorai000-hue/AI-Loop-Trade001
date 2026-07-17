@@ -11,10 +11,13 @@ from scipy import stats
 
 from .inference import (  # noqa: F401
     adjust_alpha,
+    benjamini_hochberg_accept,
     block_bootstrap_mean_pvalue,
+    bootstrap_gate_feasible,
     deflated_sharpe_ratio,
     expected_max_sharpe,
     hac_mean_pvalue,
+    min_bootstrap_pvalue,
     newey_west_lags,
     probability_of_backtest_overfitting,
     regime_trade_counts,

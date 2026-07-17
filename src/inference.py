@@ -221,19 +221,73 @@ def probability_of_backtest_overfitting(
 
 
 def adjust_alpha(alpha: float, n_tests: int, method: str = "bonferroni") -> float:
-    """Family-wise / FDR-style alpha for a single-test gate."""
+    """Family-wise alpha for a *single-test* gate.
+
+    - ``none``: unadjusted ``alpha``
+    - ``bonferroni`` / ``holm``: ``alpha / m`` (Holm needs ordered p's; this is the
+      first-step / conservative per-comparison stand-in)
+    - ``fdr_bh``: returns unadjusted ``alpha``. True Benjamini–Hochberg needs the
+      full p-value family — use :func:`benjamini_hochberg_accept` after search.
+      (Previously this incorrectly used ``alpha/m``, i.e. Bonferroni.)
+    """
     a = max(0.0, float(alpha))
     m = max(1, int(n_tests))
     method = (method or "none").lower()
     if method in ("none", "off", ""):
         return a
     if method in ("bonferroni", "holm"):
-        # Per-comparison threshold under Bonferroni (conservative; Holm needs all p's).
         return a / m
     if method in ("fdr", "fdr_bh", "bh"):
-        # Conservative single-test stand-in when only one p is available.
-        return a * (1.0 / m)
+        return a
     return a
+
+
+def benjamini_hochberg_accept(
+    p_values: list[float],
+    *,
+    alpha: float = 0.05,
+) -> list[bool]:
+    """Benjamini–Hochberg FDR control at level ``alpha``.
+
+    Returns a boolean mask aligned with ``p_values`` (True = reject H0 / significant).
+    """
+    m = len(p_values)
+    if m == 0:
+        return []
+    a = max(0.0, float(alpha))
+    order = sorted(range(m), key=lambda i: float(p_values[i]))
+    accepted = [False] * m
+    max_k = -1
+    for rank, idx in enumerate(order, start=1):
+        p = float(p_values[idx])
+        if p <= a * rank / m:
+            max_k = rank
+    if max_k < 0:
+        return accepted
+    for rank, idx in enumerate(order, start=1):
+        if rank <= max_k:
+            accepted[idx] = True
+    return accepted
+
+
+def min_bootstrap_pvalue(n_boot: int) -> float:
+    """Smallest p-value ``(extremes+1)/(n_boot+1)`` can return (extremes=0)."""
+    boots = max(0, int(n_boot))
+    if boots <= 0:
+        return 0.0
+    return 1.0 / (boots + 1)
+
+
+def bootstrap_gate_feasible(
+    *,
+    n_boot: int,
+    alpha: float,
+    n_tests: int,
+    multiple_testing: str,
+) -> bool:
+    """False when Bonferroni (etc.) threshold is below the bootstrap resolution."""
+    thr = adjust_alpha(alpha, n_tests, multiple_testing)
+    return min_bootstrap_pvalue(n_boot) < thr
 
 
 def regime_trade_counts(

@@ -1,4 +1,4 @@
-"""Shared helpers for parameter search rankings and PBO gating."""
+"""Shared helpers for parameter search rankings and PBO / FDR gating."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Any, Optional
 import numpy as np
 import pandas as pd
 
-from .inference import probability_of_backtest_overfitting
+from .inference import benjamini_hochberg_accept, probability_of_backtest_overfitting
 from .persistence import StateStore
 from .strategy import StrategyParams
 from .validator import StrategyValidator, ValidationResult
@@ -31,7 +31,8 @@ def validation_ranking_row(
         "ic": val.ic,
         "oos_degradation": val.oos_degradation,
         "overfitting": val.overfitting,
-        "reasons": val.reasons,
+        "reasons": list(val.reasons),
+        "flags": list(val.flags),
         "n_trades": val.n_trades,
         "oos_n_trades": val.oos_n_trades,
         "regime_trades": val.regime_trades,
@@ -59,6 +60,71 @@ def compute_search_pbo(
     cols = [s.fillna(0.0).to_numpy(dtype=float)[:length] for s in return_series]
     mat = np.column_stack(cols)
     return probability_of_backtest_overfitting(mat, n_slices=n_slices)
+
+
+def apply_fdr_bh_gate(
+    *,
+    validator: StrategyValidator,
+    best_params: Optional[StrategyParams],
+    best_val: Optional[ValidationResult],
+    accepted_count: int,
+    rankings: list[dict[str, Any]],
+) -> tuple[Optional[StrategyParams], Optional[ValidationResult], int]:
+    """Apply Benjamini–Hochberg FDR across the search family's p-values.
+
+    When ``multiple_testing=fdr_bh``, per-candidate validation defers the p-gate;
+    this post-pass rejects candidates whose p fails BH at ``p_value_max``.
+    """
+    cfg = validator.config
+    mt = (cfg.multiple_testing or "none").lower()
+    if mt not in ("fdr", "fdr_bh", "bh") or not rankings:
+        return best_params, best_val, accepted_count
+
+    alpha = float(cfg.p_value_max)
+    p_values = [float(row.get("p_value", 1.0) or 1.0) for row in rankings]
+    mask = benjamini_hochberg_accept(p_values, alpha=alpha)
+    reason_tail = f"fails FDR-BH (alpha={alpha}, m={len(p_values)})"
+
+    for i, row in enumerate(rankings):
+        if not row.get("accepted"):
+            continue
+        if mask[i]:
+            continue
+        row["accepted"] = False
+        reasons = list(row.get("reasons") or [])
+        msg = f"p_value {p_values[i]:.4f} {reason_tail}"
+        if msg not in reasons:
+            reasons.append(msg)
+        row["reasons"] = reasons
+        flags = list(row.get("flags") or [])
+        if "fdr_bh_gate" not in flags:
+            flags.append("fdr_bh_gate")
+        row["flags"] = flags
+
+    new_accepted = sum(1 for r in rankings if r.get("accepted"))
+    survivors = sorted(
+        (r for r in rankings if r.get("accepted")),
+        key=lambda r: float(r.get("sharpe") or 0.0),
+        reverse=True,
+    )
+
+    if best_params is not None:
+        bp = best_params.as_dict()
+        if any(r.get("params") == bp and r.get("accepted") for r in rankings):
+            return best_params, best_val, new_accepted
+        if best_val is not None:
+            best_val.accepted = False
+            msg = f"p_value {best_val.p_value:.4f} {reason_tail}"
+            if msg not in best_val.reasons:
+                best_val.reasons.append(msg)
+            if "fdr_bh_gate" not in best_val.flags:
+                best_val.flags.append("fdr_bh_gate")
+
+    if not survivors:
+        return None, best_val, 0
+
+    top = survivors[0]
+    return StrategyParams(**top["params"]), best_val, new_accepted
 
 
 def apply_pbo_gate(

@@ -148,3 +148,53 @@ def test_verify_flat_restarts_cancel_if_pending_reappears():
 
     monitor._advance_flatten()
     assert monitor.phase == KillPhase.CANCEL_PENDING
+
+
+def test_locked_and_flat_stays_dormant_while_state_locked():
+    monitor, store, _ = _monitor(store=Store(locked=True, equity_peak=1000.0))
+    monitor._phase = KillPhase.LOCKED_AND_FLAT
+    monitor._reason = "prior dd"
+    monitor._on_trigger_fired = True
+
+    monitor._tick()
+    assert monitor.phase == KillPhase.LOCKED_AND_FLAT
+    assert store.is_locked() is True
+
+
+def test_manual_unlock_resumes_kill_switch_monitoring():
+    """STATE.locked=false must restart DD monitoring (not leave KS dead)."""
+    store = Store(locked=True, equity_peak=1000.0)
+    monitor, store, executor = _monitor(store=store)
+    monitor.connection = SimpleNamespace(
+        ensure=lambda: True,
+        account_info=lambda: SimpleNamespace(equity=1000.0, margin=0.0),
+    )
+    monitor._phase = KillPhase.LOCKED_AND_FLAT
+    monitor._reason = "prior dd"
+    monitor._on_trigger_fired = True
+    monitor._equity_peak = 1000.0
+
+    store.state["locked"] = False
+    monitor._tick()
+
+    assert monitor.phase == KillPhase.IDLE
+    assert monitor.triggered is False
+    assert monitor._on_trigger_fired is False
+    assert store.state.get("equity") == 1000.0
+
+
+def test_manual_unlock_retriggers_if_drawdown_still_breached():
+    store = Store(locked=True, equity_peak=1000.0)
+    monitor, store, executor = _monitor(store=store)
+    # Default Connection equity=800 → 20% DD >= 10% max
+    monitor._phase = KillPhase.LOCKED_AND_FLAT
+    monitor._reason = "prior dd"
+    monitor._on_trigger_fired = True
+    monitor._equity_peak = 1000.0
+
+    store.state["locked"] = False
+    monitor._tick()
+
+    assert store.is_locked() is True
+    assert monitor.phase != KillPhase.IDLE
+    assert monitor.triggered is True

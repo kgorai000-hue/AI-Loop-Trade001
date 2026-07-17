@@ -13,7 +13,12 @@ from .backtest import Backtester
 from .persistence import StateStore
 from .risk import CostModel
 # Backward-compatible re-exports (prefer ``src.search``).
-from .search import apply_pbo_gate, compute_search_pbo, validation_ranking_row  # noqa: F401
+from .search import (  # noqa: F401
+    apply_fdr_bh_gate,
+    apply_pbo_gate,
+    compute_search_pbo,
+    validation_ranking_row,
+)
 from .strategy import StrategyParams
 from .validator import StrategyValidator, ValidationResult
 
@@ -106,6 +111,14 @@ class ParameterOptimizer:
                     f"Rejected overfitting sharpe={val.sharpe:.2f} params={params.as_dict()}"
                 )
 
+        best_params, best_val, accepted_count = apply_fdr_bh_gate(
+            validator=self.validator,
+            best_params=best_params,
+            best_val=best_val,
+            accepted_count=accepted_count,
+            rankings=rankings,
+        )
+
         best_params, best_val, accepted_count, pbo = apply_pbo_gate(
             validator=self.validator,
             state_store=self.state_store,
@@ -140,11 +153,22 @@ class ParameterOptimizer:
         cfg: dict[str, Any],
         cost_model: Optional[CostModel] = None,
         state_store: Optional[StateStore] = None,
+        *,
+        risk: Optional[Any] = None,
+        symbol_spec: Optional[Any] = None,
+        initial_equity: Optional[float] = None,
+        backtester: Optional[Backtester] = None,
     ) -> "ParameterOptimizer":
         vcfg = cfg.get("validator", {})
         ocfg = cfg.get("optimizer", {})
         validator = StrategyValidator(StrategyValidator.config_from_dict(vcfg))
-        bt = Backtester.from_app_config(cfg, cost_model=cost_model)
+        bt = backtester or Backtester.from_app_config(
+            cfg,
+            cost_model=cost_model,
+            risk=risk,
+            symbol_spec=symbol_spec,
+            initial_equity=initial_equity,
+        )
         opt_cfg = OptimizerConfig(
             long_windows=list(ocfg.get("long_windows", OptimizerConfig().long_windows)),
             short_windows=list(ocfg.get("short_windows", OptimizerConfig().short_windows)),

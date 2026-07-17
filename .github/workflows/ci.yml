@@ -8,6 +8,7 @@ on:
 
 jobs:
   test:
+    name: Ubuntu pytest
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -31,4 +32,34 @@ jobs:
 
       - name: Run tests
         run: pytest -q --tb=short
-        # MetaTrader5 is stubbed in tests/conftest.py (no Windows wheel needed).
+        # MetaTrader5 wheel is Windows-only; tests/conftest.py stubs it on Linux.
+        # tests/test_windows_mt5_compat.py still checks official constant values
+        # against that stub so drift is caught here too.
+
+  windows-mt5:
+    name: Windows MT5 wheel compat
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Windows deps (incl. MetaTrader5 wheel)
+        run: |
+          python -m pip install -U pip
+          pip install -r requirements-windows.txt
+
+      - name: Import + static MT5 / Windows filesystem checks
+        run: >
+          pytest -q --tb=short
+          tests/test_windows_mt5_compat.py
+          tests/test_persistence.py
+          tests/test_connection.py
+        # Real MetaTrader5 wheel import, constants, namedtuple layouts,
+        # order_send() without terminal, filling-mode mapping, os.replace.
+        # Does not connect to an FxPro terminal (no credentials / no terminal64).

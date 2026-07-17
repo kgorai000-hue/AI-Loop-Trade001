@@ -16,6 +16,7 @@ from .execution import OrderExecutor
 from .intelligence import IntelligenceLoop
 from .persistence import StateStore
 from .risk import CostModel, RiskManager
+from .splits import max_evaluated_oos_end
 from .strategy import RegressionStrategy, Signal, StrategyDecision, StrategyParams
 from .validator import StrategyValidator
 
@@ -88,6 +89,34 @@ class SymbolTrader:
         tick = self.feed.tick()
         risk_cfg = self.app_config.get("risk") or {}
         return CostModel.from_symbol_info(info, tick=tick, risk_cfg=risk_cfg)
+
+    def live_symbol_spec(self) -> Optional[SymbolSpec]:
+        """MT5 contract metadata for account-currency sizing (None if unavailable)."""
+        info = self.connection.symbol_info(self.symbol)
+        if info is None:
+            return None
+        bid = float(getattr(info, "bid", 0) or 0) or 1.0
+        return SymbolSpec.from_mt5_info(
+            info,
+            margin_per_lot=self._margin_per_lot(Signal.LONG, bid),
+        )
+
+    def live_account_equity(self) -> Optional[float]:
+        account = self.connection.account_info()
+        if account is None:
+            return None
+        eq = float(getattr(account, "equity", 0) or 0)
+        return eq if eq > 0 else None
+
+    def make_backtester(self) -> Backtester:
+        """Build a Backtester aligned with live MT5 symbol / equity / costs / risk."""
+        return Backtester.from_app_config(
+            self.app_config,
+            cost_model=self.cost_model(),
+            risk=self.risk,
+            symbol_spec=self.live_symbol_spec(),
+            initial_equity=self.live_account_equity(),
+        )
 
     def fetch_history(self, months: int = 6) -> Optional[Any]:
         return self.feed.last_n_months(months=months)
@@ -207,6 +236,7 @@ class SymbolTrader:
                 volume=0.0,
                 volume_step=volume_step,
                 magic=self.MAGIC,
+                state_store=self.store,
             )
             result["order"] = reconciliation.as_dict()
             self._record_closed_trades(reconciliation)
@@ -221,12 +251,50 @@ class SymbolTrader:
 
         price = float(tick.ask if target_signal == Signal.LONG else tick.bid)
         point = float(getattr(info, "point", 0.01) or 0.01)
-        tick_size = float(getattr(info, "trade_tick_size", 0) or 0) or point
+        # Live: never substitute point for missing tick_size — that hides bad specs.
+        tick_size = float(getattr(info, "trade_tick_size", 0) or 0)
         tick_value = float(getattr(info, "trade_tick_value", 0) or 0)
         digits = int(getattr(info, "digits", 2) or 2)
+        if tick_size <= 0 or tick_value <= 0:
+            result["order"] = {
+                "ok": False,
+                "message": (
+                    f"tick_size/tick_value unavailable "
+                    f"(tick_size={tick_size}, tick_value={tick_value}); order blocked"
+                ),
+            }
+            result["lots"] = 0.0
+            return result
+
         free_margin = float(getattr(account, "margin_free", 0) or 0)
         margin_per_lot = self._margin_per_lot(target_signal, price)
         open_risk = self._open_risk_reserved(price=price, tick_size=tick_size, tick_value=tick_value)
+
+        # Provisional SL so we can require order_calc_profit before sizing.
+        stop_distance = self.risk.buffered_stop_distance(price, point)
+        provisional_sl = self.risk.stop_loss_price(
+            side_long=target_signal == Signal.LONG,
+            entry_price=price,
+            stop_distance=stop_distance,
+            digits=digits,
+        )
+        if provisional_sl is None:
+            result["order"] = {"ok": False, "message": "stop loss required but not computed"}
+            result["lots"] = 0.0
+            return result
+
+        profit_risk = self._stop_risk_per_lot_via_profit(
+            side=target_signal,
+            entry_price=price,
+            stop_loss=provisional_sl,
+        )
+        if profit_risk is None:
+            result["order"] = {
+                "ok": False,
+                "message": "order_calc_profit unavailable; order blocked",
+            }
+            result["lots"] = 0.0
+            return result
 
         decision_lots = self.risk.position_lots(
             equity=float(account.equity),
@@ -243,6 +311,7 @@ class SymbolTrader:
             free_margin=free_margin if free_margin > 0 else None,
             margin_per_lot=margin_per_lot,
             open_risk=open_risk,
+            allow_notional_fallback=False,
         )
         lots = decision_lots.lots
         result["lots"] = lots
@@ -272,6 +341,7 @@ class SymbolTrader:
             magic=self.MAGIC,
             sl=decision_lots.stop_loss,
             rebalance_band=rebalance_band,
+            state_store=self.store,
         )
         result["order"] = reconciliation.as_dict()
         self._record_closed_trades(reconciliation)
@@ -290,6 +360,51 @@ class SymbolTrader:
             logger.debug("%s order_calc_margin unavailable", self.symbol, exc_info=True)
             return None
 
+    def _stop_risk_per_lot_via_profit(
+        self,
+        *,
+        side: Signal,
+        entry_price: float,
+        stop_loss: float,
+    ) -> Optional[float]:
+        """Account-currency loss for 1 lot at SL via ``order_calc_profit``.
+
+        Returns ``None`` when MT5 cannot compute profit — live path must block.
+        """
+        calc = getattr(self.connection, "order_calc_profit", None)
+        if not callable(calc):
+            return None
+        try:
+            import MetaTrader5 as mt5
+
+            order_type = mt5.ORDER_TYPE_BUY if side == Signal.LONG else mt5.ORDER_TYPE_SELL
+            profit = calc(
+                order_type,
+                self.symbol,
+                1.0,
+                float(entry_price),
+                float(stop_loss),
+            )
+        except Exception:
+            logger.warning(
+                "%s order_calc_profit failed; live sizing blocked",
+                self.symbol,
+                exc_info=True,
+            )
+            return None
+        if profit is None:
+            logger.warning("%s order_calc_profit returned None; live sizing blocked", self.symbol)
+            return None
+        risk = abs(float(profit))
+        if risk <= 0:
+            logger.warning(
+                "%s order_calc_profit risk/lot=%.6f invalid; live sizing blocked",
+                self.symbol,
+                risk,
+            )
+            return None
+        return risk
+
     def _open_risk_reserved(self, *, price: float, tick_size: float, tick_value: float) -> float:
         positions = self.executor.managed_positions(self.symbol, magic=self.MAGIC)
         if positions is None:
@@ -301,9 +416,7 @@ class SymbolTrader:
 
         info = self.connection.symbol_info(self.symbol)
         point = float(getattr(info, "point", 0.01) or 0.01) if info is not None else 0.01
-        fallback = self.risk.stop_distance_price(price, point) * max(
-            1.0, float(self.risk.gap_buffer_mult)
-        )
+        fallback = self.risk.buffered_stop_distance(price, point)
         total = 0.0
         for p in positions:
             side_long = p.type == mt5.POSITION_TYPE_BUY
@@ -321,6 +434,11 @@ class SymbolTrader:
         return total
 
     def _record_closed_trades(self, reconciliation: Any) -> None:
+        """Record confirmed realized close PnL into Kelly history.
+
+        ``closed_pnl is None`` means the close deal was not confirmed via
+        history — skip rather than learning from pre-close MTM estimates.
+        """
         recorded = False
         for order in getattr(reconciliation, "orders", []) or []:
             pnl = getattr(order, "closed_pnl", None)
@@ -415,26 +533,7 @@ class SymbolTrader:
         df = self.fetch_history(months=months)
         if df is None:
             return {"ok": False, "error": "no history"}
-        cost = self.cost_model()
-        symbol_spec = None
-        initial_equity = None
-        info = self.connection.symbol_info(self.symbol)
-        if info is not None:
-            symbol_spec = SymbolSpec.from_mt5_info(
-                info, margin_per_lot=self._margin_per_lot(Signal.LONG, float(getattr(info, "bid", 0) or 0) or 1.0)
-            )
-        account = self.connection.account_info()
-        if account is not None:
-            eq = float(getattr(account, "equity", 0) or 0)
-            if eq > 0:
-                initial_equity = eq
-        bt = Backtester.from_app_config(
-            self.app_config,
-            cost_model=cost,
-            risk=self.risk,
-            symbol_spec=symbol_spec,
-            initial_equity=initial_equity,
-        )
+        bt = self.make_backtester()
         validator = StrategyValidator(
             StrategyValidator.config_from_dict(self.app_config.get("validator"))
         )
@@ -465,16 +564,37 @@ class SymbolTrader:
         df = self.fetch_history(months=months)
         if df is None:
             return {"ok": False, "error": "no history"}
+        bt = self.make_backtester()
         intel = IntelligenceLoop(
             self.app_config,
             state_store=self.store,
-            cost_model=self.cost_model(),
+            cost_model=bt.cost_model,
+            risk=self.risk,
+            symbol_spec=bt.symbol_spec,
+            initial_equity=bt.account.initial_equity,
+            backtester=bt,
         )
         use_nested = bool(self.app_config.get("optimizer", {}).get("nested_search", True))
-        outcome = intel.run_nested(df) if use_nested else intel.run(df)
+        exclude_before = None
+        if use_nested:
+            state = self.store.read_state()
+            exclude_before = max_evaluated_oos_end(
+                state.get("evaluated_rolling_oos") or []
+            )
+            outcome = intel.run_nested(df, exclude_oos_before=exclude_before)
+        else:
+            outcome = intel.run(df)
+
+        # Record rolling OOS period boundaries whenever the gate was attempted,
+        # accept or reject — never reuse the same window.
+        if outcome.rolling_oos_window is not None:
+            self._record_rolling_oos_window(outcome.rolling_oos_window)
+
         if outcome.best_params is not None and outcome.best_validation is not None:
             self.strategy.update_params(outcome.best_params)
             v = outcome.best_validation
+            # Maker/Checker-facing metrics: search / fold OOS only.
+            # Do NOT store rolling_oos_validation.sharpe here.
             metrics = {
                 "sharpe": v.sharpe,
                 "max_drawdown": v.max_drawdown,
@@ -487,8 +607,8 @@ class SymbolTrader:
             }
             if outcome.outer_mean_sharpe is not None:
                 metrics["outer_mean_sharpe"] = outcome.outer_mean_sharpe
-            if outcome.holdout_validation is not None:
-                metrics["holdout_sharpe"] = outcome.holdout_validation.sharpe
+            if outcome.outer_median_sharpe is not None:
+                metrics["outer_median_sharpe"] = outcome.outer_median_sharpe
             if outcome.pbo is not None:
                 metrics["pbo"] = outcome.pbo
             elif v.pbo is not None:
@@ -505,6 +625,7 @@ class SymbolTrader:
                 outcome.path,
             )
         else:
+            # Generic failure note only — no rolling OOS metrics/reasons.
             self.store.append_lesson(
                 "Weekend/optimize cycle found no validator-passing params "
                 f"(path={outcome.path})"
@@ -519,13 +640,42 @@ class SymbolTrader:
             "best_params": outcome.best_params.as_dict() if outcome.best_params else None,
             "best_validation": outcome.best_validation.as_dict() if outcome.best_validation else None,
             "outer_mean_sharpe": outcome.outer_mean_sharpe,
-            "holdout_validation": (
-                outcome.holdout_validation.as_dict() if outcome.holdout_validation else None
+            "outer_median_sharpe": outcome.outer_median_sharpe,
+            "rolling_oos_window": outcome.rolling_oos_window,
+            "rolling_oos_accepted": (
+                outcome.rolling_oos_validation.accepted
+                if outcome.rolling_oos_validation is not None
+                else None
             ),
             "fold_results": outcome.fold_results,
             "top": outcome.rankings[:5],
             "pbo": outcome.pbo,
         }
+
+    def _record_rolling_oos_window(self, window: dict[str, str]) -> None:
+        """Persist evaluated rolling-OOS boundaries (gate reuse prevention)."""
+        state = self.store.read_state()
+        hist = [
+            dict(h)
+            for h in (state.get("evaluated_rolling_oos") or [])
+            if isinstance(h, dict)
+        ]
+        entry = {
+            "start": window["start"],
+            "end": window["end"],
+            "evaluated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        hist = [
+            h
+            for h in hist
+            if not (h.get("start") == entry["start"] and h.get("end") == entry["end"])
+        ]
+        hist.append(entry)
+        hist = hist[-20:]
+        self.store.update_state(
+            evaluated_rolling_oos=hist,
+            last_rolling_oos=entry,
+        )
 
     def metrics_degraded(self, sharpe_trigger: float = 0.20, ic_trigger: float = 0.20) -> bool:
         """Compare a fresh backtest vs stored last_metrics."""

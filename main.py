@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.loop_engine import LoopEngine
+from src.process_lock import ProcessLock
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
@@ -150,8 +151,18 @@ def main(argv: list[str] | None = None) -> int:
     cfg = load_config(args.config)
     log_dir = cfg.get("loop", {}).get("log_dir", "logs")
     setup_logging(ROOT / log_dir if not Path(log_dir).is_absolute() else log_dir)
+
+    # Cross-process exclusive lock: prevents dual MT5 loops / kill-switches /
+    # STATE writers when Task Scheduler and a manual start overlap.
+    state_dir = cfg.get("paths", {}).get("state_dir", "state")
+    lock = ProcessLock.for_project(ROOT, state_dir)
+    lock.acquire_or_exit(exit_code=1)
+
     engine = LoopEngine(cfg)
-    return int(args.func(engine, args))
+    try:
+        return int(args.func(engine, args))
+    finally:
+        lock.release()
 
 
 if __name__ == "__main__":

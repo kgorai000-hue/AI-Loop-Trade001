@@ -176,17 +176,20 @@ class LotDecision:
 
 @dataclass
 class RiskManager:
-    half_kelly: bool = True
+    half_kelly: bool = False
     default_win_rate: float = 0.52
     default_reward_risk: float = 1.5
-    max_fraction: float = 0.25
+    max_fraction: float = 0.005
     max_lots: float = 5.0
     min_lots: float = 0.01
     lookback_trades: int = 50
+    # Kelly stays off until this many closed trades; use cold_start_fraction instead.
+    kelly_min_trades: int = 30
+    cold_start_fraction: float = 0.005
     stop_pct: float = 0.005
     stop_points: Optional[float] = None
     gap_buffer_mult: float = 1.25
-    max_open_risk_fraction: float = 0.25
+    max_open_risk_fraction: float = 0.01
     max_margin_fraction: float = 0.50
     recent_pnls: list[float] = field(default_factory=list)
 
@@ -195,17 +198,19 @@ class RiskManager:
         cfg = cfg or {}
         stop_points = cfg.get("stop_points")
         return cls(
-            half_kelly=bool(cfg.get("half_kelly", True)),
+            half_kelly=bool(cfg.get("half_kelly", False)),
             default_win_rate=float(cfg.get("default_win_rate", 0.52)),
             default_reward_risk=float(cfg.get("default_reward_risk", 1.5)),
-            max_fraction=float(cfg.get("max_fraction", 0.25)),
+            max_fraction=float(cfg.get("max_fraction", 0.005)),
             max_lots=float(cfg.get("max_lots", 5.0)),
             min_lots=float(cfg.get("min_lots", 0.01)),
             lookback_trades=int(cfg.get("lookback_trades", 50)),
+            kelly_min_trades=int(cfg.get("kelly_min_trades", 30)),
+            cold_start_fraction=float(cfg.get("cold_start_fraction", 0.005)),
             stop_pct=float(cfg.get("stop_pct", 0.005)),
             stop_points=float(stop_points) if stop_points is not None else None,
             gap_buffer_mult=float(cfg.get("gap_buffer_mult", 1.25)),
-            max_open_risk_fraction=float(cfg.get("max_open_risk_fraction", 0.25)),
+            max_open_risk_fraction=float(cfg.get("max_open_risk_fraction", 0.01)),
             max_margin_fraction=float(cfg.get("max_margin_fraction", 0.50)),
         )
 
@@ -216,6 +221,13 @@ class RiskManager:
 
     def load_trade_history(self, pnls: list[float]) -> None:
         self.recent_pnls = [float(p) for p in pnls][-self.lookback_trades * 2 :]
+
+    def empirical_trade_count(self) -> int:
+        return len(self.recent_pnls[-self.lookback_trades :])
+
+    def kelly_ready(self) -> bool:
+        """True once enough closed trades exist to estimate W/R for Kelly."""
+        return self.empirical_trade_count() >= max(0, int(self.kelly_min_trades))
 
     def estimate_wr_rr(self) -> tuple[float, float]:
         pnls = self.recent_pnls[-self.lookback_trades :]
@@ -234,7 +246,7 @@ class RiskManager:
     def kelly_fraction(
         self, win_rate: Optional[float] = None, reward_risk: Optional[float] = None
     ) -> float:
-        """f* = W - (1-W)/R ; half-Kelly = 0.5 * f*."""
+        """f* = W - (1-W)/R ; half-Kelly = 0.5 * f*; capped by ``max_fraction``."""
         w = self.default_win_rate if win_rate is None else win_rate
         r = self.default_reward_risk if reward_risk is None else reward_risk
         if r <= 0:
@@ -244,6 +256,27 @@ class RiskManager:
         frac = max(0.0, min(frac, self.max_fraction))
         return float(frac)
 
+    def sizing_fraction(
+        self,
+        win_rate: Optional[float] = None,
+        reward_risk: Optional[float] = None,
+    ) -> tuple[float, str]:
+        """Equity fraction to risk on the next trade, plus a mode label.
+
+        Until ``kelly_min_trades`` closed trades accumulate, Kelly is disabled and
+        ``cold_start_fraction`` is used (prototype / demo safe default).
+        """
+        if not self.kelly_ready():
+            frac = max(0.0, min(float(self.cold_start_fraction), float(self.max_fraction)))
+            return float(frac), "cold_start"
+        if win_rate is None or reward_risk is None:
+            ew, er = self.estimate_wr_rr()
+            win_rate = win_rate if win_rate is not None else ew
+            reward_risk = reward_risk if reward_risk is not None else er
+        frac = self.kelly_fraction(win_rate, reward_risk)
+        label = "half_kelly" if self.half_kelly else "kelly"
+        return float(frac), label
+
     def stop_distance_price(self, price: float, point: float = 0.01) -> float:
         """Price distance from entry to stop (before gap buffer)."""
         if self.stop_points is not None and self.stop_points > 0 and point > 0:
@@ -251,6 +284,11 @@ class RiskManager:
         if price <= 0 or self.stop_pct <= 0:
             return 0.0
         return float(price) * float(self.stop_pct)
+
+    def buffered_stop_distance(self, price: float, point: float = 0.01) -> float:
+        """Stop distance after ``gap_buffer_mult`` (sizing only; not fill price)."""
+        base = self.stop_distance_price(price, point)
+        return base * max(1.0, float(self.gap_buffer_mult))
 
     @staticmethod
     def loss_per_lot(
@@ -322,8 +360,13 @@ class RiskManager:
         free_margin: Optional[float] = None,
         margin_per_lot: Optional[float] = None,
         open_risk: float = 0.0,
+        allow_notional_fallback: bool = False,
     ) -> LotDecision:
-        """Size lots from Kelly risk capital / max loss at (gap-buffered) stop."""
+        """Size lots from Kelly risk capital / max loss at (gap-buffered) stop.
+
+        Live trading must pass real ``tick_size`` / ``tick_value``. Notional
+        sizing is research-only (``allow_notional_fallback=True`` for backtests).
+        """
         empty = LotDecision(
             lots=0.0,
             stop_loss=None,
@@ -336,12 +379,14 @@ class RiskManager:
         if equity <= 0 or price <= 0:
             return empty
 
-        if win_rate is None or reward_risk is None:
-            ew, er = self.estimate_wr_rr()
-            win_rate = win_rate if win_rate is not None else ew
-            reward_risk = reward_risk if reward_risk is not None else er
+        # Explicit W/R from caller still uses Kelly path; otherwise cold-start
+        # until enough closed trades exist (never size on default W/R alone).
+        if win_rate is not None and reward_risk is not None:
+            frac = self.kelly_fraction(win_rate, reward_risk)
+            frac_mode = "half_kelly" if self.half_kelly else "kelly"
+        else:
+            frac, frac_mode = self.sizing_fraction()
 
-        frac = self.kelly_fraction(win_rate, reward_risk)
         if frac <= 0:
             return LotDecision(
                 lots=0.0,
@@ -350,12 +395,11 @@ class RiskManager:
                 risk_capital=0.0,
                 risk_per_lot=0.0,
                 open_risk_reserved=max(0.0, float(open_risk)),
-                message="kelly fraction=0",
+                message=f"{frac_mode} fraction=0",
             )
 
         point_v = float(point) if point and point > 0 else 0.01
-        base_stop = self.stop_distance_price(price, point_v)
-        stop_distance = base_stop * max(1.0, float(self.gap_buffer_mult))
+        stop_distance = self.buffered_stop_distance(price, point_v)
         sl = self.stop_loss_price(
             side_long=side_long,
             entry_price=price,
@@ -363,10 +407,10 @@ class RiskManager:
             digits=digits,
         )
 
-        kelly_budget = equity * frac
+        risk_budget = equity * frac
         open_reserved = max(0.0, float(open_risk))
         total_cap = equity * float(self.max_open_risk_fraction)
-        risk_capital = min(kelly_budget, max(0.0, total_cap - open_reserved))
+        risk_capital = min(risk_budget, max(0.0, total_cap - open_reserved))
 
         ts = float(tick_size) if tick_size and tick_size > 0 else 0.0
         tv = float(tick_value) if tick_value and tick_value > 0 else 0.0
@@ -375,23 +419,25 @@ class RiskManager:
         if risk_per_lot > 0 and risk_capital > 0:
             raw_lots = risk_capital / risk_per_lot
             mode = "max_loss"
-        elif contract_size > 0:
+        elif allow_notional_fallback and contract_size > 0:
             notional_per_lot = price * contract_size
-            raw_lots = kelly_budget / notional_per_lot if notional_per_lot > 0 else 0.0
+            raw_lots = risk_budget / notional_per_lot if notional_per_lot > 0 else 0.0
             mode = "notional_fallback"
             logger.warning(
-                "position_lots using notional fallback (tick_size/value missing); "
-                "stop-based risk unavailable"
+                "position_lots using notional fallback (research/backtest only); "
+                "tick_size/value missing — stop-based risk unavailable"
             )
         else:
             return LotDecision(
                 lots=0.0,
-                stop_loss=sl,
+                stop_loss=None,
                 stop_distance=stop_distance,
                 risk_capital=risk_capital,
                 risk_per_lot=0.0,
                 open_risk_reserved=open_reserved,
-                message="cannot size: missing tick value/size and contract",
+                message=(
+                    "tick_size/tick_value unavailable; lots=0 (notional fallback disabled)"
+                ),
             )
 
         vmin = volume_min if volume_min is not None else self.min_lots
@@ -417,9 +463,10 @@ class RiskManager:
             lots = 0.0
 
         msg = (
-            f"mode={mode} frac={frac:.4f} risk_cap={risk_capital:.2f} "
+            f"mode={mode} sizing={frac_mode} frac={frac:.4f} "
+            f"risk_cap={risk_capital:.2f} "
             f"risk/lot={risk_per_lot:.2f} stop={stop_distance:.5f} "
-            f"open_risk={open_reserved:.2f}"
+            f"open_risk={open_reserved:.2f} trades={self.empirical_trade_count()}"
         )
         if margin_capped:
             msg += " margin_capped"

@@ -65,6 +65,65 @@ def test_adjust_alpha_bonferroni():
     assert adjust_alpha(0.05, 1, "none") == 0.05
 
 
+def test_adjust_alpha_fdr_bh_is_not_bonferroni():
+    # Single-test adjust_alpha must not divide by m (true BH is batch).
+    assert adjust_alpha(0.05, 120, "fdr_bh") == 0.05
+
+
+def test_benjamini_hochberg_accepts_strong_signals():
+    from src.inference import benjamini_hochberg_accept
+
+    # One very small p among noise should survive BH at alpha=0.05
+    ps = [0.0001] + [0.5] * 19
+    mask = benjamini_hochberg_accept(ps, alpha=0.05)
+    assert mask[0] is True
+    assert sum(mask) >= 1
+
+
+def test_bootstrap_gate_infeasible_under_legacy_defaults():
+    from src.inference import bootstrap_gate_feasible, min_bootstrap_pvalue
+
+    assert abs(min_bootstrap_pvalue(400) - 1.0 / 401) < 1e-12
+    assert not bootstrap_gate_feasible(
+        n_boot=400,
+        alpha=0.05,
+        n_tests=120,
+        multiple_testing="bonferroni",
+    )
+    assert bootstrap_gate_feasible(
+        n_boot=400,
+        alpha=0.05,
+        n_tests=120,
+        multiple_testing="none",
+    )
+
+
+def test_validator_falls_back_to_hac_when_bootstrap_gate_impossible():
+    rng = np.random.default_rng(0)
+    edged = pd.Series(rng.normal(0.002, 0.01, size=400))
+    cfg = ValidatorConfig(
+        min_trades=1,
+        min_oos_trades=1,
+        min_regime_trades=0,
+        block_bootstrap_reps=400,
+        multiple_testing="bonferroni",
+        sharpe_min=0.0,
+        sharpe_max=100.0,
+        p_value_max=0.05,
+        oos_degradation_max=1.0,
+        max_drawdown=1.0,
+        min_dsr=0.0,
+        pbo_enabled=False,
+        pvalue_method="max",
+    )
+    v = StrategyValidator(cfg)
+    full = _result(n_trades=50, bar_returns=edged, sharpe=2.0)
+    res = v.validate_reports(full, full, full, 0.0, n_tests=120)
+    assert "bootstrap_gate_infeasible_fallback_hac" in res.flags
+    # Gate p is HAC (can be below Bonferroni floor), not floored bootstrap.
+    assert res.p_value == res.hac_p_value
+
+
 def test_block_bootstrap_rejects_zero_mean():
     rng = np.random.default_rng(1)
     zeroish = pd.Series(rng.normal(0.0, 0.01, size=800))
@@ -213,6 +272,33 @@ def test_config_from_dict_loads_new_keys():
     assert cfg.min_dsr == 0.9
     assert cfg.pbo_max == 0.4
     assert cfg.pbo_slices == 10
+
+
+def test_default_config_allows_hac_under_grid_n_tests():
+    """Default hac + none must be able to pass where bootstrap+Bonferroni cannot."""
+    rng = np.random.default_rng(2)
+    edged = pd.Series(rng.normal(0.003, 0.01, size=500))
+    cfg = ValidatorConfig(
+        min_trades=1,
+        min_oos_trades=1,
+        min_regime_trades=0,
+        block_bootstrap_reps=400,
+        multiple_testing="none",
+        sharpe_min=0.0,
+        sharpe_max=100.0,
+        p_value_max=0.05,
+        oos_degradation_max=1.0,
+        max_drawdown=1.0,
+        min_dsr=0.0,
+        pbo_enabled=False,
+        pvalue_method="hac",
+    )
+    v = StrategyValidator(cfg)
+    full = _result(n_trades=50, bar_returns=edged, sharpe=2.0)
+    res = v.validate_reports(full, full, full, 0.0, n_tests=120)
+    assert res.p_value_threshold == 0.05
+    assert res.p_value < 0.05
+    assert res.accepted
 
 
 def test_hac_inflates_p_under_autocorrelation():

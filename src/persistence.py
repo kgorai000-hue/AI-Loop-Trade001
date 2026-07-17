@@ -87,6 +87,12 @@ class StateStore:
             "last_maker_run": None,
             "last_processed_bar": None,
             "recent_pnls": [],
+            "order_intents": [],
+            # Weekend review schedule (persisted; survives process restart).
+            "last_review_date": None,
+            # Rolling OOS gate windows already evaluated (not a sealed holdout).
+            "evaluated_rolling_oos": [],
+            "last_rolling_oos": None,
         }
 
     def _ensure_files(self) -> None:

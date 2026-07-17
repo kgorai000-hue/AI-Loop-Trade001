@@ -1,7 +1,8 @@
 # AI-Loop-Trade001 — Windows VPS Dual-OLS + Maker/Checker
 
 Windows-VPS CLI system that connects to FxPro MetaTrader 5, trades `#US30`
-on M30 with a dual-window OLS slope strategy, sizes with half-Kelly, and
+on M30 with a dual-window OLS slope strategy, sizes with capped risk (cold-start
+fixed fraction until enough trades for Kelly), and
 self-improves via **Anthropic Maker → Checker → mathematical Validator**
 (with nested walk-forward / grid-search fallback).
 
@@ -14,7 +15,7 @@ on Ubuntu/Linux for live MT5 access.
 1. **Maker** (`claude-sonnet-4-5` by default) proposes dual-OLS parameter JSON.
 2. **Checker** (`claude-opus-4-8` by default) adversarially approves/rejects.
 3. **Validator** enforces hard gates (DD, Sharpe band, HAC/bootstrap p-value,
-   DSR, PBO, trade-count floors, OOS / nested holdout).
+   DSR, PBO, trade-count floors, OOS / nested rolling OOS gate).
 4. Accepted params persist in `state/US30/STATE.md`; failures append to `SKILL.md`.
 5. **KillSwitchMonitor** thread flattens and locks if account DD ≥ 10%.
 
@@ -54,24 +55,42 @@ python main.py loop
 ```
 
 To unlock after a kill-switch lock, set `locked: false` in `state/US30/STATE.md`
-manually after reviewing the cause (no automatic unlock).
+manually after reviewing the cause (no automatic unlock). The kill-switch monitor
+detects the unlock on the next poll and resumes drawdown watching (it does not
+stay stopped in `LOCKED_AND_FLAT`).
 
 ### Optional: Task Scheduler
 
 Run `python main.py loop` at logon via Task Scheduler (highest privileges if MT5
 needs them). Prefer a logged-on session where the MT5 terminal stays running.
 
+Only one `main.py` process may run per install: startup takes an OS-level lock
+(Windows named mutex + `state/.ai_loop_trade.lock`). A second start exits
+immediately so Task Scheduler and a manual launch cannot double-trade.
+
 ## CI
 
-GitHub Actions (`.github/workflows/ci.yml`) runs `pytest` on Ubuntu for Python
-3.11 and 3.12 using `requirements.txt`. The real `MetaTrader5` package is not
-installed in CI; `tests/conftest.py` provides a stub.
+GitHub Actions (`.github/workflows/ci.yml`):
 
-Locally:
+| Job | Runner | What it covers |
+|-----|--------|----------------|
+| Ubuntu pytest | `ubuntu-latest` · Py 3.11/3.12 | Full logic suite; `MetaTrader5` stubbed |
+| Windows MT5 wheel compat | `windows-latest` · Py 3.12 | Real `MetaTrader5` wheel import, official constants, `OrderSendResult` / `TradeDeal` / `SymbolInfo` field layouts, `order_send` without a terminal, filling-mode mapping, Windows `os.replace` STATE writes |
+
+Live FxPro terminal connection and broker-specific `filling_mode` discovery are **not** exercised in CI (no terminal / credentials on runners).
+
+Locally (Linux or Windows without the wheel):
 
 ```powershell
 pip install -r requirements.txt
 pytest -q
+```
+
+On a Windows VPS with the wheel:
+
+```powershell
+pip install -r requirements-windows.txt
+pytest -q tests/test_windows_mt5_compat.py
 ```
 
 ## CLI
@@ -99,11 +118,18 @@ python main.py review
 |------|------|
 | Max drawdown | < 10% |
 | Sharpe | 1.5 ≤ Sharpe ≤ 3.0 |
-| Significance | HAC / block-bootstrap p-value (Bonferroni vs candidate count) |
+| Significance | HAC p-value (unadjusted); DSR/PBO handle selection bias |
 | DSR / PBO | Deflated Sharpe ≥ 0.95; search PBO ≤ 0.50 |
 | Sample size | ≥ 40 full-sample trades; ≥ 15 OOS; ≥ 10 per regime |
 | OOS | IS→OOS Sharpe degradation ≤ 30% |
 | Costs | Spread once + commission/slippage each way; ≥ 10 bps **round-trip** floor |
+
+Bootstrap p-values are optional diagnostics (`pvalue_method: block_bootstrap|max`).
+Do not pair them with Bonferroni at low `block_bootstrap_reps`: the floor
+`1/(n_boot+1)` can sit above `alpha/m`, making every grid candidate impossible.
+If you enable a bootstrap gate, use `multiple_testing: none` or raise reps so
+`1/(n_boot+1) < alpha/m` (e.g. ≥12 000 for 120 tests at α=0.05). `fdr_bh` now
+runs a true Benjamini–Hochberg pass over the search family (not α/m).
 
 ## Layout
 
@@ -117,7 +143,7 @@ python main.py review
 | `src/backtest.py` | Limit fills + account sizing backtester |
 | `src/validator.py` | Rejection gates |
 | `src/search.py` | Ranking rows + PBO search gate |
-| `src/risk.py` | Half-Kelly + cost model |
+| `src/risk.py` | Cold-start risk + Kelly (after min trades) + cost model |
 | `src/execution.py` | Limit orders + kill flatten |
 | `src/optimizer.py` | Grid search fallback |
 | `src/splits.py` | Holdout / walk-forward splits |

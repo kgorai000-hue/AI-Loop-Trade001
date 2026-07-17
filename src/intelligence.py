@@ -10,14 +10,14 @@ from typing import Any, Optional
 import pandas as pd
 
 from .anthropic_client import AnthropicClient
-from .backtest import Backtester, BacktestResult
+from .backtest import Backtester, BacktestResult, SymbolSpec
 from .checker import StrategyChecker
 from .maker import StrategyMaker
-from .optimizer import OptimizeOutcome, ParameterOptimizer
+from .optimizer import OptimizeOutcome, OptimizerConfig, ParameterOptimizer
 from .persistence import StateStore
-from .risk import CostModel
-from .search import apply_pbo_gate, validation_ranking_row
-from .splits import chronological_holdout, walk_forward_folds, with_warmup
+from .risk import CostModel, RiskManager
+from .search import apply_fdr_bh_gate, apply_pbo_gate, validation_ranking_row
+from .splits import chronological_rolling_oos, walk_forward_folds, with_warmup
 from .strategy import StrategyParams
 from .validator import StrategyValidator, ValidationResult
 
@@ -35,8 +35,14 @@ class IntelligenceOutcome:
     checker_rejected: int = 0
     maker_proposed: int = 0
     fold_results: list[dict[str, Any]] = field(default_factory=list)
-    holdout_validation: Optional[ValidationResult] = None
+    # Rolling OOS gate only — never feed these metrics/reasons into Maker,
+    # Checker, SKILL, or last_metrics (that would adapt to the gate).
+    rolling_oos_validation: Optional[ValidationResult] = None
+    rolling_oos_window: Optional[dict[str, str]] = None
+    # Mean/median of *per-fold* OOS Sharpes (each fold's own selected params on
+    # that fold's OOS only). Never re-apply one fold's winner across earlier OOS.
     outer_mean_sharpe: Optional[float] = None
+    outer_median_sharpe: Optional[float] = None
     pbo: Optional[float] = None
 
 
@@ -45,10 +51,13 @@ class IntelligenceLoop:
     LLM-first parameter search with mathematical Validator as final gate.
     Falls back to grid ParameterOptimizer when API unavailable or no LLM accept.
 
-    Nested mode (``run_nested``):
-      1) Peel final holdout (never used for selection)
-      2) Outer walk-forward: inner search on train only, score on fold OOS
-      3) Holdout gate once on the selected params
+    Nested mode (``run_nested``) for periodic ops:
+      1) Peel *rolling OOS* (not a permanent sealed holdout)
+      2) Outer walk-forward: each fold selects on train, scores on *that* fold OOS
+      3) Aggregate fold OOS Sharpes (mean/median) — no cross-fold re-application
+      4) Re-search final params on all pre-rolling-OOS data; gate once on rolling OOS
+         (empty / reused window → fail-closed: best_params=None)
+      5) Rolling OOS results are not written to SKILL / Maker / Checker feedback
     """
 
     def __init__(
@@ -56,12 +65,20 @@ class IntelligenceLoop:
         app_config: dict[str, Any],
         state_store: StateStore,
         cost_model: Optional[CostModel] = None,
+        *,
+        risk: Optional[RiskManager] = None,
+        symbol_spec: Optional[SymbolSpec] = None,
+        initial_equity: Optional[float] = None,
+        backtester: Optional[Backtester] = None,
     ) -> None:
         self.app_config = app_config
         self.state_store = state_store
         self.cost_model = cost_model or CostModel.from_risk_config(
             app_config.get("risk")
         )
+        self.risk = risk
+        self.symbol_spec = symbol_spec
+        self.initial_equity = initial_equity
         acfg = app_config.get("anthropic", {})
         self.client = AnthropicClient(
             max_retries=int(acfg.get("max_retries", 5)),
@@ -86,9 +103,13 @@ class IntelligenceLoop:
         self.validator = StrategyValidator(
             StrategyValidator.config_from_dict(app_config.get("validator"))
         )
-        self.backtester = Backtester.from_app_config(
+        # Prefer the same live-aligned Backtester as backtest_and_validate().
+        self.backtester = backtester or Backtester.from_app_config(
             app_config,
             cost_model=self.cost_model,
+            risk=risk,
+            symbol_spec=symbol_spec,
+            initial_equity=initial_equity,
         )
         self.nested_inner = str(ocfg.get("nested_inner", "grid")).lower()
 
@@ -111,41 +132,24 @@ class IntelligenceLoop:
         grid.path = "unavailable"
         return grid
 
-    def run_nested(self, df: pd.DataFrame) -> IntelligenceOutcome:
-        """Nested selection: inner search → outer walk-forward → holdout once."""
-        vcfg = self.validator.config
-        search_df, holdout = chronological_holdout(
-            df,
-            vcfg.holdout_fraction,
-        )
-        if search_df.empty:
-            return IntelligenceOutcome(
-                best_params=None,
-                best_validation=None,
-                tried=0,
-                accepted_count=0,
-                path="nested",
-            )
+    @staticmethod
+    def _nested_outcome(**kwargs: Any) -> IntelligenceOutcome:
+        kwargs.setdefault("path", "nested")
+        kwargs.setdefault("best_params", None)
+        kwargs.setdefault("best_validation", None)
+        kwargs.setdefault("tried", 0)
+        kwargs.setdefault("accepted_count", 0)
+        return IntelligenceOutcome(**kwargs)
 
-        folds = walk_forward_folds(
-            search_df,
-            n_folds=vcfg.wf_folds,
-            min_train_fraction=vcfg.wf_min_train_fraction,
-        )
-        if not folds:
-            logger.warning("Nested search: insufficient data for WF folds; abort")
-            return IntelligenceOutcome(
-                best_params=None,
-                best_validation=None,
-                tried=0,
-                accepted_count=0,
-                path="nested",
-            )
-
+    def _score_walk_forward_folds(
+        self,
+        folds: list[tuple[pd.DataFrame, pd.DataFrame]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[float], int, int]:
         fold_results: list[dict[str, Any]] = []
+        rankings: list[dict[str, Any]] = []
+        fold_oos_sharpes: list[float] = []
         tried = 0
         accepted_count = 0
-        rankings: list[dict[str, Any]] = []
 
         for fold_i, (train, outer_oos) in enumerate(folds):
             logger.info(
@@ -176,6 +180,7 @@ class IntelligenceLoop:
 
             outer_bt = self._run_on_segment(train, outer_oos, inner.best_params)
             outer_sharpe = float(outer_bt.report.sharpe)
+            fold_oos_sharpes.append(outer_sharpe)
             fold_results.append(
                 {
                     "fold": fold_i,
@@ -190,88 +195,173 @@ class IntelligenceLoop:
                     "inner_path": inner.path,
                 }
             )
+        return fold_results, rankings, fold_oos_sharpes, tried, accepted_count
 
-        candidates = [f for f in fold_results if f.get("params") and f.get("outer_sharpe") is not None]
-        if not candidates:
+    def _gate_rolling_oos(
+        self,
+        *,
+        search_df: pd.DataFrame,
+        rolling_oos: pd.DataFrame,
+        oos_window: Optional[dict[str, str]],
+        best_params: StrategyParams,
+        exclude_oos_before: Optional[pd.Timestamp],
+    ) -> tuple[Optional[ValidationResult], Optional[dict[str, str]], bool]:
+        """Return ``(validation, window, accepted)``. Never writes SKILL."""
+        if rolling_oos.empty or oos_window is None:
+            logger.warning(
+                "Nested search: empty rolling OOS (exclude_before=%s); "
+                "rejecting optimization (fail-closed, no final gate)",
+                exclude_oos_before,
+            )
+            return (
+                ValidationResult(
+                    accepted=False,
+                    reasons=["empty rolling OOS; final gate unavailable"],
+                ),
+                None,
+                False,
+            )
+
+        rolling_bt = self._run_on_segment(search_df, rolling_oos, best_params)
+        rolling_val = self.validator.validate_reports(
+            rolling_bt,
+            rolling_bt,
+            rolling_bt,
+            0.0,
+            check_oos_trades=False,
+            n_tests=1,
+        )
+        if not rolling_val.accepted:
+            logger.info(
+                "Nested rolling OOS rejected params=%s reasons=%s "
+                "(not written to SKILL)",
+                best_params.as_dict(),
+                (rolling_val.reasons or ["rolling OOS failed"])[:3],
+            )
+            return rolling_val, oos_window, False
+        return rolling_val, oos_window, True
+
+    def run_nested(
+        self,
+        df: pd.DataFrame,
+        *,
+        exclude_oos_before: Optional[pd.Timestamp] = None,
+    ) -> IntelligenceOutcome:
+        """Nested selection with rolling OOS gate (no cross-fold look-ahead).
+
+        - Each WF fold picks params on its train window and is scored only on
+          that fold's outer OOS (pure fold OOS).
+        - ``outer_mean_sharpe`` / ``outer_median_sharpe`` aggregate those
+          fold-specific OOS scores — never re-apply one fold's winner to earlier
+          OOS windows.
+        - Final params are re-searched on all pre-rolling-OOS data, then gated
+          once on a *new* rolling OOS window (bars after ``exclude_oos_before``).
+        - Rolling OOS metrics/reasons are never appended to SKILL and must not be
+          written into Maker/Checker-facing ``last_metrics``.
+        """
+        vcfg = self.validator.config
+        search_df, rolling_oos, oos_window = chronological_rolling_oos(
+            df,
+            vcfg.rolling_oos_fraction,
+            exclude_oos_before=exclude_oos_before,
+        )
+        if search_df.empty:
+            return self._nested_outcome()
+
+        folds = walk_forward_folds(
+            search_df,
+            n_folds=vcfg.wf_folds,
+            min_train_fraction=vcfg.wf_min_train_fraction,
+        )
+        if not folds:
+            logger.warning("Nested search: insufficient data for WF folds; abort")
+            return self._nested_outcome()
+
+        fold_results, rankings, fold_oos_sharpes, tried, accepted_count = (
+            self._score_walk_forward_folds(folds)
+        )
+
+        if not fold_oos_sharpes:
             self.state_store.append_lesson(
                 "Nested search: no fold produced an inner-accepted params set"
             )
-            return IntelligenceOutcome(
-                best_params=None,
-                best_validation=None,
+            return self._nested_outcome(
                 tried=tried,
                 accepted_count=accepted_count,
-                path="nested",
                 rankings=rankings,
                 fold_results=fold_results,
             )
 
-        # Prefer params with the best outer-fold Sharpe (selection uses outer OOS only,
-        # never the final holdout).
-        best_fold = max(candidates, key=lambda f: float(f["outer_sharpe"]))
-        best_params = StrategyParams(
-            long_window=int(best_fold["params"]["long_window"]),
-            short_window=int(best_fold["params"]["short_window"]),
-            max_hold_bars=int(best_fold["params"]["max_hold_bars"]),
+        outer_mean = float(sum(fold_oos_sharpes) / len(fold_oos_sharpes))
+        outer_median = float(pd.Series(fold_oos_sharpes).median())
+
+        logger.info(
+            "Nested final re-search on pre-rolling-OOS bars=%d "
+            "(fold_oos mean=%.4f median=%.4f n=%d)",
+            len(search_df),
+            outer_mean,
+            outer_median,
+            len(fold_oos_sharpes),
         )
+        final_inner = self._run_inner(search_df)
+        tried += final_inner.tried
+        accepted_count += final_inner.accepted_count
+        for row in final_inner.rankings:
+            row = dict(row)
+            row["fold"] = "final_pre_rolling_oos"
+            rankings.append(row)
 
-        # Score the chosen params on every outer fold for a stable mean.
-        all_outer: list[float] = []
-        for train, outer_oos in folds:
-            scored = self._run_on_segment(train, outer_oos, best_params)
-            all_outer.append(float(scored.report.sharpe))
-        outer_mean = float(sum(all_outer) / len(all_outer)) if all_outer else None
-
-        holdout_val: Optional[ValidationResult] = None
-        if holdout.empty:
-            logger.warning("Nested search: empty holdout; skipping final gate")
-            accepted = True
-        else:
-            holdout_bt = self._run_on_segment(search_df, holdout, best_params)
-            holdout_val = self.validator.validate_reports(
-                holdout_bt,
-                holdout_bt,
-                holdout_bt,
-                0.0,
-                check_oos_trades=False,
-                n_tests=1,
-            )
-            accepted = bool(holdout_val.accepted)
-
-        if not accepted:
-            reasons = holdout_val.reasons if holdout_val else ["holdout failed"]
+        if final_inner.best_params is None:
             self.state_store.append_lesson(
-                f"Nested holdout rejected params={best_params.as_dict()}: "
-                f"{', '.join(reasons[:3])}"
+                "Nested search: final pre-rolling-OOS re-search found no accepted params"
             )
-            return IntelligenceOutcome(
-                best_params=None,
-                best_validation=holdout_val,
+            return self._nested_outcome(
                 tried=tried,
                 accepted_count=accepted_count,
-                path="nested",
                 rankings=rankings,
                 fold_results=fold_results,
-                holdout_validation=holdout_val,
                 outer_mean_sharpe=outer_mean,
+                outer_median_sharpe=outer_median,
+            )
+
+        rolling_val, oos_window, accepted = self._gate_rolling_oos(
+            search_df=search_df,
+            rolling_oos=rolling_oos,
+            oos_window=oos_window,
+            best_params=final_inner.best_params,
+            exclude_oos_before=exclude_oos_before,
+        )
+        if not accepted:
+            return self._nested_outcome(
+                tried=tried,
+                accepted_count=accepted_count,
+                rankings=rankings,
+                fold_results=fold_results,
+                rolling_oos_validation=rolling_val,
+                rolling_oos_window=oos_window,
+                outer_mean_sharpe=outer_mean,
+                outer_median_sharpe=outer_median,
             )
 
         logger.info(
-            "Nested search accepted params=%s outer_mean_sharpe=%s holdout_sharpe=%s",
-            best_params.as_dict(),
+            "Nested search accepted params=%s fold_oos_mean=%s fold_oos_median=%s "
+            "rolling_oos_window=%s",
+            final_inner.best_params.as_dict(),
             outer_mean,
-            holdout_val.sharpe if holdout_val else None,
+            outer_median,
+            oos_window,
         )
-        return IntelligenceOutcome(
-            best_params=best_params,
-            best_validation=holdout_val,
+        return self._nested_outcome(
+            best_params=final_inner.best_params,
+            best_validation=final_inner.best_validation,
             tried=tried,
             accepted_count=accepted_count,
-            path="nested",
             rankings=rankings,
             fold_results=fold_results,
-            holdout_validation=holdout_val,
+            rolling_oos_validation=rolling_val,
+            rolling_oos_window=oos_window,
             outer_mean_sharpe=outer_mean,
+            outer_median_sharpe=outer_median,
         )
 
     def _run_inner(self, train: pd.DataFrame) -> IntelligenceOutcome:
@@ -377,6 +467,13 @@ class IntelligenceLoop:
                         f"params={rev.params.as_dict()}"
                     )
 
+        best_params, best_val, accepted_count = apply_fdr_bh_gate(
+            validator=self.validator,
+            best_params=best_params,
+            best_val=best_val,
+            accepted_count=accepted_count,
+            rankings=rankings,
+        )
         best_params, best_val, accepted_count, pbo = apply_pbo_gate(
             validator=self.validator,
             state_store=self.state_store,
@@ -400,9 +497,21 @@ class IntelligenceLoop:
         )
 
     def _run_grid(self, df: pd.DataFrame) -> IntelligenceOutcome:
-        opt = ParameterOptimizer.from_config_dict(
-            self.app_config,
-            cost_model=self.cost_model,
+        ocfg = self.app_config.get("optimizer", {})
+        opt = ParameterOptimizer(
+            validator=self.validator,
+            backtester=self.backtester,
+            config=OptimizerConfig(
+                long_windows=list(
+                    ocfg.get("long_windows", OptimizerConfig().long_windows)
+                ),
+                short_windows=list(
+                    ocfg.get("short_windows", OptimizerConfig().short_windows)
+                ),
+                max_hold_bars=list(
+                    ocfg.get("max_hold_bars", OptimizerConfig().max_hold_bars)
+                ),
+            ),
             state_store=self.state_store,
         )
         outcome: OptimizeOutcome = opt.optimize(df)

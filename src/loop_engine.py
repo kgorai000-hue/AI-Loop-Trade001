@@ -80,6 +80,9 @@ class LoopEngine:
         if not self.traders:
             raise ValueError("No enabled symbols in config")
 
+        # Persist across process restarts (in-memory alone is not enough).
+        self._last_review_date = self._load_last_review_date()
+
         ks = config.get("kill_switch", {})
         self.kill_switch = KillSwitchMonitor(
             connection=self.connection,
@@ -124,6 +127,20 @@ class LoopEngine:
                 logger.exception("Error on_new_bar for %s", t.symbol)
         return events
 
+    def _load_last_review_date(self) -> Optional[str]:
+        """Load the latest persisted review date across symbol STATE files."""
+        dates: list[str] = []
+        for t in self.traders:
+            raw = t.store.read_state().get("last_review_date")
+            if isinstance(raw, str) and raw:
+                dates.append(raw)
+        return max(dates) if dates else None
+
+    def _persist_last_review_date(self, day_key: str) -> None:
+        self._last_review_date = day_key
+        for t in self.traders:
+            t.store.update_state(last_review_date=day_key)
+
     def should_review(self, now: Optional[datetime] = None) -> bool:
         now = now or datetime.now(timezone.utc)
         if now.weekday() != self.review_weekday:
@@ -131,7 +148,9 @@ class LoopEngine:
         if now.hour < self.review_hour_utc:
             return False
         day_key = now.strftime("%Y-%m-%d")
-        if self._last_review_date == day_key:
+        # Prefer persisted date (survives restart); fall back to in-memory.
+        persisted = self._load_last_review_date()
+        if persisted == day_key or self._last_review_date == day_key:
             return False
         return True
 
@@ -162,7 +181,8 @@ class LoopEngine:
                 logger.exception("Review failed for %s", t.symbol)
                 outcomes.append({"symbol": t.symbol, "ok": False, "error": str(exc)})
 
-        self._last_review_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        day_key = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        self._persist_last_review_date(day_key)
         return outcomes
 
     def run_forever(self) -> None:

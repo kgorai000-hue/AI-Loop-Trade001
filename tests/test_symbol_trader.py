@@ -47,6 +47,9 @@ class Connection:
     def order_calc_margin(self, order_type, symbol, volume, price):
         return 100.0
 
+    def order_calc_profit(self, order_type, symbol, volume, price_open, price_close):
+        return -abs(float(price_open) - float(price_close)) * float(volume)
+
     def ensure(self):
         return True
 
@@ -72,6 +75,13 @@ class Risk:
 
     def stop_distance_price(self, price, point=0.01):
         return price * 0.005
+
+    def buffered_stop_distance(self, price, point=0.01):
+        return self.stop_distance_price(price, point) * max(1.0, float(self.gap_buffer_mult))
+
+    def stop_loss_price(self, *, side_long, entry_price, stop_distance, digits=2):
+        raw = entry_price - stop_distance if side_long else entry_price + stop_distance
+        return float(round(raw, digits))
 
     gap_buffer_mult = 1.25
 
@@ -210,3 +220,116 @@ def test_max_hold_forces_flat_target():
     assert executor.targets[-1]["side"] == Signal.FLAT
     assert executor.targets[-1]["volume"] == 0.0
     assert trader.store.state["equity"] == 1000.0
+
+
+def test_maybe_trade_blocks_when_tick_value_missing():
+    frame = pd.DataFrame(
+        {
+            "time": pd.date_range("2026-01-01", periods=8, freq="30min", tz="UTC"),
+            "close": [1, 2, 3, 4, 5, 6, 7, 8],
+        }
+    )
+    trader, executor = _trader(frame)
+    trader.connection.symbol_info = lambda symbol: SimpleNamespace(
+        volume_step=0.01,
+        volume_min=0.01,
+        volume_max=5.0,
+        trade_contract_size=1.0,
+        point=0.1,
+        trade_tick_size=0.1,
+        trade_tick_value=0.0,
+        digits=1,
+        trade_stops_level=0,
+        bid=100.0,
+    )
+    decision = StrategyDecision(
+        signal=Signal.LONG,
+        regime=Regime.TREND,
+        b_long=1.0,
+        b_short=0.5,
+        bar_time=frame["time"].iloc[-1],
+    )
+    result = trader.maybe_trade(decision)
+    assert result["lots"] == 0.0
+    assert result["order"]["ok"] is False
+    assert "tick_size/tick_value unavailable" in result["order"]["message"]
+    assert executor.targets == []
+
+
+def test_maybe_trade_blocks_when_order_calc_profit_unavailable():
+    frame = pd.DataFrame(
+        {
+            "time": pd.date_range("2026-01-01", periods=8, freq="30min", tz="UTC"),
+            "close": [1, 2, 3, 4, 5, 6, 7, 8],
+        }
+    )
+    trader, executor = _trader(frame)
+    trader.connection.order_calc_profit = lambda *a, **k: None
+    decision = StrategyDecision(
+        signal=Signal.LONG,
+        regime=Regime.TREND,
+        b_long=1.0,
+        b_short=0.5,
+        bar_time=frame["time"].iloc[-1],
+    )
+    result = trader.maybe_trade(decision)
+    assert result["lots"] == 0.0
+    assert result["order"]["ok"] is False
+    assert "order_calc_profit unavailable" in result["order"]["message"]
+    assert executor.targets == []
+
+
+def test_make_backtester_uses_live_mt5_spec_and_shared_risk():
+    from src.backtest import SymbolSpec
+    from src.intelligence import IntelligenceLoop
+    from src.risk import CostModel, RiskManager
+
+    frame = pd.DataFrame(
+        {
+            "time": pd.date_range("2026-01-01", periods=8, freq="30min", tz="UTC"),
+            "close": [1, 2, 3, 4, 5, 6, 7, 8],
+        }
+    )
+    real_risk = RiskManager(max_fraction=0.005, cold_start_fraction=0.005)
+    trader, _ = _trader(frame)
+    trader.risk = real_risk
+    trader.app_config = {
+        "risk": {},
+        "backtest": {"account_sizing": True, "initial_equity": 10_000.0},
+    }
+    trader.connection.account_info = lambda: SimpleNamespace(
+        equity=55_000.0, margin=0.0, margin_free=55_000.0
+    )
+    trader.connection.symbol_info = lambda symbol: SimpleNamespace(
+        volume_step=0.01,
+        volume_min=0.01,
+        volume_max=5.0,
+        trade_contract_size=1.0,
+        point=0.1,
+        trade_tick_size=0.5,
+        trade_tick_value=2.5,
+        digits=1,
+        bid=100.0,
+        ask=101.0,
+        spread=10.0,
+    )
+
+    bt = trader.make_backtester()
+    assert bt.risk is real_risk
+    assert isinstance(bt.symbol_spec, SymbolSpec)
+    assert bt.symbol_spec.tick_size == 0.5
+    assert bt.symbol_spec.tick_value == 2.5
+    assert bt.account.initial_equity == 55_000.0
+
+    intel = IntelligenceLoop(
+        trader.app_config,
+        state_store=trader.store,
+        cost_model=bt.cost_model,
+        risk=real_risk,
+        symbol_spec=bt.symbol_spec,
+        initial_equity=bt.account.initial_equity,
+        backtester=bt,
+    )
+    assert intel.backtester is bt
+    assert intel.backtester.symbol_spec.tick_value == 2.5
+    assert intel.risk is real_risk

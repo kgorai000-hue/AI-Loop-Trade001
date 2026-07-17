@@ -58,6 +58,7 @@ def test_max_loss_lots_use_tick_value_not_notional():
         stop_pct=0.01,
         gap_buffer_mult=1.0,
         max_open_risk_fraction=1.0,
+        kelly_min_trades=0,
     )
     # full kelly = 0.6 - 0.4/2 = 0.4 → capped to 0.10
     # equity 10_000 → risk_capital 1000
@@ -89,6 +90,7 @@ def test_open_risk_reduces_budget():
         stop_pct=0.01,
         gap_buffer_mult=1.0,
         max_open_risk_fraction=0.20,
+        kelly_min_trades=0,
     )
     # kelly budget = 0.2 * 10000 = 2000; open_risk 1500 → remaining 500
     # stop dist 100 on price 10000; tick 1/1 → 100/lot → lots=5
@@ -125,6 +127,7 @@ def test_margin_cap_limits_lots():
         max_open_risk_fraction=1.0,
         max_margin_fraction=0.5,
         max_lots=100,
+        kelly_min_trades=0,
     )
     decision = risk.position_lots(
         equity=100_000,
@@ -140,3 +143,116 @@ def test_margin_cap_limits_lots():
     # margin allows 1000*0.5/100 = 5 lots
     assert decision.margin_capped is True
     assert decision.lots == 5.0
+
+
+def test_live_path_blocks_notional_fallback_without_ticks():
+    risk = RiskManager(
+        half_kelly=False,
+        default_win_rate=1.0,
+        default_reward_risk=1.0,
+        max_fraction=0.10,
+        stop_pct=0.01,
+        gap_buffer_mult=1.0,
+        max_open_risk_fraction=1.0,
+        kelly_min_trades=0,
+    )
+    decision = risk.position_lots(
+        equity=10_000,
+        price=40_000,
+        contract_size=1.0,
+        tick_size=0.0,
+        tick_value=0.0,
+        allow_notional_fallback=False,
+    )
+    assert decision.lots == 0.0
+    assert "notional fallback disabled" in decision.message
+
+
+def test_backtest_may_use_notional_fallback():
+    risk = RiskManager(
+        half_kelly=False,
+        default_win_rate=1.0,
+        default_reward_risk=1.0,
+        max_fraction=0.10,
+        stop_pct=0.01,
+        gap_buffer_mult=1.0,
+        max_open_risk_fraction=1.0,
+        max_lots=100,
+        kelly_min_trades=0,
+    )
+    decision = risk.position_lots(
+        equity=10_000,
+        price=40_000,
+        contract_size=1.0,
+        tick_size=None,
+        tick_value=None,
+        volume_step=0.01,
+        allow_notional_fallback=True,
+        win_rate=1.0,
+        reward_risk=1.0,
+    )
+    assert decision.lots > 0
+    assert "notional_fallback" in decision.message
+
+
+def test_cold_start_uses_fixed_fraction_not_default_kelly():
+    """Unlearned defaults must not size at ~10% half-Kelly."""
+    risk = RiskManager(
+        half_kelly=True,
+        default_win_rate=0.52,
+        default_reward_risk=1.5,
+        max_fraction=0.005,
+        cold_start_fraction=0.005,
+        kelly_min_trades=30,
+        stop_pct=0.01,
+        gap_buffer_mult=1.0,
+        max_open_risk_fraction=0.01,
+    )
+    frac, mode = risk.sizing_fraction()
+    assert mode == "cold_start"
+    assert abs(frac - 0.005) < 1e-12
+    # Half-Kelly on defaults would be ~0.10 before cap — must not be used yet.
+    assert risk.kelly_fraction() == 0.005  # capped
+    assert not risk.kelly_ready()
+
+    decision = risk.position_lots(
+        equity=10_000,
+        price=40_000,
+        contract_size=1.0,
+        tick_size=1.0,
+        tick_value=1.0,
+        point=1.0,
+        volume_step=0.01,
+    )
+    assert "cold_start" in decision.message
+    # risk_capital <= 0.5% of equity (and open-risk cap 1%)
+    assert decision.risk_capital <= 50.0 + 1e-9
+
+
+def test_kelly_activates_after_min_trades():
+    risk = RiskManager(
+        half_kelly=False,
+        default_win_rate=0.6,
+        default_reward_risk=2.0,
+        max_fraction=0.10,
+        cold_start_fraction=0.005,
+        kelly_min_trades=5,
+        lookback_trades=50,
+        stop_pct=0.01,
+        gap_buffer_mult=1.0,
+        max_open_risk_fraction=1.0,
+    )
+    for pnl in [10, 10, 10, -5, -5]:
+        risk.record_trade(pnl)
+    assert risk.kelly_ready()
+    frac, mode = risk.sizing_fraction()
+    assert mode == "kelly"
+    # Empirical W=0.6 R=2 → full Kelly = 0.4 capped to 0.10
+    assert abs(frac - 0.10) < 1e-12
+
+
+def test_buffered_stop_distance_applies_gap_mult():
+    risk = RiskManager(stop_pct=0.01, gap_buffer_mult=1.25)
+    base = risk.stop_distance_price(40_000.0, point=1.0)
+    assert abs(base - 400.0) < 1e-9
+    assert abs(risk.buffered_stop_distance(40_000.0, point=1.0) - 500.0) < 1e-9

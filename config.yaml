@@ -32,24 +32,28 @@ strategy:
   max_hold_bars: 16
 
 risk:
-  half_kelly: true
+  # Prototype / demo: fixed cold-start risk until kelly_min_trades closes.
+  # (Default W=0.52 R=1.5 → full Kelly ~20% / half-Kelly ~10% — too large vs 10% kill.)
+  half_kelly: false
   # Round-trip cost floor (10 bps = 0.1%). Spread is charged once; commission/slip twice.
   round_trip_floor_bps: 10
   # min_cost_bps: 10          # deprecated alias for round_trip_floor_bps
   commission_one_way_bps: 0
   slippage_one_way_bps: 0     # assumed cost; FillModel.slippage_bps is fill-price impact
   # spread_bps: 0             # offline override; live uses MT5 bid–ask
-  default_win_rate: 0.52
+  default_win_rate: 0.52      # used only after kelly_min_trades (or explicit W/R)
   default_reward_risk: 1.5
-  max_fraction: 0.25        # hard cap on kelly fraction of equity risked
+  max_fraction: 0.005         # hard cap on equity fraction risked per trade (0.5%)
+  cold_start_fraction: 0.005  # fixed risk while Kelly is disabled
+  kelly_min_trades: 30        # closed trades required before Kelly sizing
   max_lots: 5.0
   min_lots: 0.01
-  lookback_trades: 50       # for empirical W / R estimation
+  lookback_trades: 50         # for empirical W / R estimation
   # Max-loss sizing (stop distance → account-currency loss via tick_value)
   stop_pct: 0.005           # 0.5% of price when stop_points is null
   # stop_points: 100        # optional: distance in points (price/point units)
-  gap_buffer_mult: 1.25     # inflate stop for gap risk in sizing
-  max_open_risk_fraction: 0.25  # total open risk / equity
+  gap_buffer_mult: 1.25     # inflate stop for gap risk in *sizing* only (fills use OHLC open)
+  max_open_risk_fraction: 0.01  # total open risk / equity (1%)
   max_margin_fraction: 0.50     # free-margin usage cap
   rebalance_band: 0.15          # same-side lot drift ignored below 15%; else delta only
 
@@ -81,17 +85,21 @@ validator:
   p_value_max: 0.05
   oos_degradation_max: 0.30
   is_fraction: 0.70             # inner IS/OOS split within each train window
-  holdout_fraction: 0.15        # final untouched tail (scored once)
-  wf_folds: 3                   # outer walk-forward folds on pre-holdout data
+  rolling_oos_fraction: 0.15    # rolling OOS tail (periodic ops; NOT a sealed holdout)
+  # holdout_fraction: 0.15      # deprecated alias for rolling_oos_fraction
+  wf_folds: 3                   # outer walk-forward folds on pre-rolling-OOS data
   wf_min_train_fraction: 0.40
   min_trades: 40                # full-sample floor (~30–50)
-  min_oos_trades: 15            # OOS / holdout floor (~10–20)
+  min_oos_trades: 15            # OOS / rolling-OOS floor (~10–20)
   min_regime_trades: 10         # per trend / mean_reversion on full sample
   block_bootstrap_reps: 400
   block_bootstrap_block_bars: 48  # ~1 trading day of M30
-  multiple_testing: bonferroni  # none | bonferroni | fdr_bh
+  # Selection bias: DSR + PBO are the family-wise gates. Do NOT combine
+  # Bonferroni with block-bootstrap@400 — min p=1/401 > 0.05/120.
+  multiple_testing: none        # none | bonferroni | fdr_bh (true BH after search)
   # n_tests: 0                  # 0 → use candidate count from optimizer/LLM
-  pvalue_method: max            # iid | hac | block_bootstrap | max (HAC∪bootstrap)
+  pvalue_method: hac            # iid | hac | block_bootstrap | max
+  # block_bootstrap_report: false  # set true to also compute bootstrap under hac
   hac_lags: 0                   # 0 → Newey–West automatic bandwidth
   min_dsr: 0.95                 # Deflated Sharpe Ratio floor (0 disables)
   pbo_enabled: true
@@ -104,7 +112,7 @@ optimizer:
   max_hold_bars: [8, 12, 16, 24]
   sharpe_degrade_trigger: 0.20   # relative drop vs last accepted
   ic_degrade_trigger: 0.20
-  nested_search: true            # inner search → outer WF → holdout once
+  nested_search: true            # inner search → outer WF → rolling OOS gate
   nested_inner: grid             # grid | auto (LLM then grid) for each WF fold
 
 anthropic:

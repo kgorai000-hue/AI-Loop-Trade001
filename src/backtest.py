@@ -217,27 +217,57 @@ class Backtester:
         df: pd.DataFrame,
         params: Optional[StrategyParams],
         strategy: Optional[RegressionStrategy],
-    ) -> tuple[StrategyParams, pd.DataFrame, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[
+        StrategyParams,
+        pd.DataFrame,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+    ]:
         params = params or StrategyParams()
         strategy = strategy or RegressionStrategy(params)
         strategy.update_params(params)
         annotated = strategy.signal_series(df)
         closes = annotated["close"].to_numpy(dtype=float)
-        highs, lows = self._high_low(annotated, closes)
+        opens = self._opens(annotated, closes)
+        highs, lows = self._high_low(annotated, closes, opens)
         signals = annotated["signal"].to_numpy(dtype=int)
         n = len(annotated)
         fwd = np.zeros(n, dtype=float)
         fwd[:-1] = closes[1:] / closes[:-1] - 1.0
-        return params, annotated, closes, highs, lows, signals, fwd
+        return params, annotated, closes, opens, highs, lows, signals, fwd
 
     @staticmethod
-    def _high_low(annotated: pd.DataFrame, closes: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def _opens(annotated: pd.DataFrame, closes: np.ndarray) -> np.ndarray:
+        if "open" in annotated.columns:
+            opens = annotated["open"].to_numpy(dtype=float)
+            bad = ~np.isfinite(opens)
+            if bad.any():
+                opens = opens.copy()
+                opens[bad] = closes[bad]
+            return opens
+        return closes.copy()
+
+    @staticmethod
+    def _high_low(
+        annotated: pd.DataFrame,
+        closes: np.ndarray,
+        opens: Optional[np.ndarray] = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
         if "high" in annotated.columns and "low" in annotated.columns:
             highs = annotated["high"].to_numpy(dtype=float)
             lows = annotated["low"].to_numpy(dtype=float)
             highs = np.maximum(highs, closes)
             lows = np.minimum(lows, closes)
+            if opens is not None:
+                highs = np.maximum(highs, opens)
+                lows = np.minimum(lows, opens)
             return highs, lows
+        if opens is not None:
+            return np.maximum(closes, opens), np.minimum(closes, opens)
         return closes.copy(), closes.copy()
 
     def _limit_price(self, side: int, close: float) -> float:
@@ -257,14 +287,36 @@ class Backtester:
         return float(close * (1.0 - slip)) if side > 0 else float(close * (1.0 + slip))
 
     def _sl_hit_price(
-        self, side: int, stop_loss: Optional[float], high: float, low: float
+        self,
+        side: int,
+        stop_loss: Optional[float],
+        open_px: float,
+        high: float,
+        low: float,
     ) -> Optional[float]:
+        """Stop fill price with gap-through modeling.
+
+        Long:
+          - ``open < SL`` → fill at open (adverse slippage) — gap through
+          - else ``low <= SL`` → fill near SL (adverse slippage)
+        Short: mirrored with high / open above SL.
+        """
         if stop_loss is None or stop_loss <= 0:
             return None
-        if side > 0 and low <= stop_loss:
-            return float(stop_loss)
-        if side < 0 and high >= stop_loss:
-            return float(stop_loss)
+        slip = self.fill_model.slippage_fraction
+        sl = float(stop_loss)
+        if side > 0:
+            if open_px < sl:
+                return float(open_px * (1.0 - slip))
+            if low <= sl:
+                return float(sl * (1.0 - slip))
+            return None
+        if side < 0:
+            if open_px > sl:
+                return float(open_px * (1.0 + slip))
+            if high >= sl:
+                return float(sl * (1.0 + slip))
+            return None
         return None
 
     def _size_entry(self, *, equity: float, price: float, side: int) -> tuple[float, Optional[float], float]:
@@ -289,6 +341,8 @@ class Backtester:
             free_margin=equity if equity > 0 else None,
             margin_per_lot=margin_per if margin_per > 0 else None,
             open_risk=0.0,
+            # Research path only: allow notional if symbol_spec ticks are unset.
+            allow_notional_fallback=True,
         )
         if decision.lots <= 0:
             return 0.0, None, 0.0
@@ -352,7 +406,7 @@ class Backtester:
         params: Optional[StrategyParams] = None,
         strategy: Optional[RegressionStrategy] = None,
     ) -> BacktestResult:
-        params, annotated, closes, highs, lows, signals, fwd = self._prepare(
+        params, annotated, closes, opens, highs, lows, signals, fwd = self._prepare(
             df, params, strategy
         )
         n = len(annotated)
@@ -486,7 +540,9 @@ class Backtester:
                     pending_age = 0
 
             if position != 0:
-                sl_px = self._sl_hit_price(position, stop_loss, highs[i], lows[i])
+                sl_px = self._sl_hit_price(
+                    position, stop_loss, opens[i], highs[i], lows[i]
+                )
                 if sl_px is not None:
                     exit_now(i, sl_px, "stop_loss")
 
@@ -566,7 +622,7 @@ class Backtester:
         params: Optional[StrategyParams] = None,
         strategy: Optional[RegressionStrategy] = None,
     ) -> BacktestResult:
-        params, annotated, closes, highs, lows, signals, fwd = self._prepare(
+        params, annotated, closes, opens, highs, lows, signals, fwd = self._prepare(
             df, params, strategy
         )
         n = len(annotated)
@@ -647,7 +703,9 @@ class Backtester:
 
         for i in range(n - 1):
             if position != 0:
-                sl_px = self._sl_hit_price(position, stop_loss, highs[i], lows[i])
+                sl_px = self._sl_hit_price(
+                    position, stop_loss, opens[i], highs[i], lows[i]
+                )
                 if sl_px is not None:
                     exit_now(i, sl_px, "stop_loss")
 

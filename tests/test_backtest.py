@@ -8,10 +8,11 @@ from src.risk import CostModel, RiskManager
 from src.strategy import StrategyParams
 
 
-def _frame(closes, highs=None, lows=None):
+def _frame(closes, highs=None, lows=None, opens=None):
     n = len(closes)
     data = {
         "time": pd.date_range("2026-01-01", periods=n, freq="30min", tz="UTC"),
+        "open": opens if opens is not None else closes,
         "close": closes,
         "high": highs if highs is not None else closes,
         "low": lows if lows is not None else closes,
@@ -196,6 +197,7 @@ def test_account_sizing_uses_kelly_lots_not_unit(monkeypatch):
         max_open_risk_fraction=1.0,
         max_lots=5.0,
         min_lots=0.01,
+        kelly_min_trades=0,
     )
     spec = SymbolSpec(
         tick_size=1.0,
@@ -254,6 +256,7 @@ def test_account_dd_differs_from_unit_notional_dd(monkeypatch):
         max_open_risk_fraction=1.0,
         max_lots=1.0,
         min_lots=0.01,
+        kelly_min_trades=0,
     )
     acct = Backtester(
         cost_model=CostModel(round_trip_floor=0.0),
@@ -298,6 +301,7 @@ def test_margin_stop_out_forces_liquidation(monkeypatch):
         max_open_risk_fraction=1.0,
         max_lots=50.0,
         max_margin_fraction=1.0,
+        kelly_min_trades=0,
     )
     result = Backtester(
         cost_model=CostModel(round_trip_floor=0.0),
@@ -316,3 +320,89 @@ def test_margin_stop_out_forces_liquidation(monkeypatch):
 
     assert result.liquidations >= 1
     assert any(t.get("exit_fill") == "stop_out" or t.get("fill") == "stop_out" for t in result.trades)
+
+
+def test_sl_gap_through_fills_at_open_not_stop():
+    """Long gap: open below SL must fill at open, not exactly at SL."""
+    bt = Backtester(fill_model=FillModel(enabled=True, slippage_bps=0.0))
+    px = bt._sl_hit_price(1, 39_500.0, open_px=39_000.0, high=39_100.0, low=38_900.0)
+    assert px == 39_000.0
+
+
+def test_sl_intra_bar_fills_near_stop():
+    bt = Backtester(fill_model=FillModel(enabled=True, slippage_bps=0.0))
+    px = bt._sl_hit_price(1, 39_500.0, open_px=39_600.0, high=39_700.0, low=39_400.0)
+    assert px == 39_500.0
+
+
+def test_sl_gap_applies_adverse_slippage():
+    bt = Backtester(fill_model=FillModel(enabled=True, slippage_bps=10.0))  # 0.1%
+    px = bt._sl_hit_price(1, 39_500.0, open_px=39_000.0, high=39_100.0, low=38_900.0)
+    assert abs(px - 39_000.0 * 0.999) < 1e-9
+
+
+def test_sl_short_gap_fills_at_open():
+    bt = Backtester(fill_model=FillModel(enabled=True, slippage_bps=0.0))
+    px = bt._sl_hit_price(-1, 40_500.0, open_px=41_000.0, high=41_200.0, low=40_800.0)
+    assert px == 41_000.0
+
+
+def test_backtest_long_stop_gap_exit_price(monkeypatch):
+    """Account-mode long: next-bar open below SL exits at open, not SL."""
+    n = 10
+    closes = np.array([40_000.0] * 6 + [39_200.0, 39_300.0, 39_400.0, 39_500.0])
+    opens = np.array([40_000.0] * 6 + [39_000.0, 39_200.0, 39_300.0, 39_400.0])
+    highs = np.maximum(closes, opens) + 50.0
+    lows = np.minimum(closes, opens) - 50.0
+    frame = _frame(closes, highs=highs, lows=lows, opens=opens)
+    params = StrategyParams(long_window=3, short_window=2, max_hold_bars=100)
+
+    signals = np.zeros(n, dtype=int)
+    signals[4:7] = 1
+
+    def fake_signal_series(self, df):
+        out = df.copy()
+        out["signal"] = signals
+        return out
+
+    monkeypatch.setattr(
+        "src.strategy.RegressionStrategy.signal_series",
+        fake_signal_series,
+    )
+
+    risk = RiskManager(
+        half_kelly=False,
+        default_win_rate=0.6,
+        default_reward_risk=2.0,
+        max_fraction=0.5,
+        stop_pct=0.01,
+        gap_buffer_mult=1.0,
+        max_open_risk_fraction=1.0,
+        max_lots=5.0,
+        max_margin_fraction=1.0,
+        kelly_min_trades=0,
+    )
+    result = Backtester(
+        cost_model=CostModel(round_trip_floor=0.0),
+        fill_model=FillModel(enabled=False, slippage_bps=0.0),
+        account=AccountConfig(enabled=True, initial_equity=100_000.0, stop_out_level=0.01),
+        symbol_spec=SymbolSpec(
+            tick_size=1.0,
+            tick_value=1.0,
+            contract_size=1.0,
+            point=1.0,
+            margin_per_lot=100.0,
+            volume_max=5.0,
+        ),
+        risk=risk,
+    ).run(frame, params=params)
+
+    stop_exits = [
+        t
+        for t in result.trades
+        if t.get("exit") is not None and t.get("exit_fill") == "stop_loss"
+    ]
+    assert stop_exits, result.trades
+    assert any(abs(float(t["exit"]) - 39_000.0) < 1e-6 for t in stop_exits)
+    # Must not pretend the gap filled at the stop (~39600).
+    assert all(float(t["exit"]) < 39_400.0 for t in stop_exits)
