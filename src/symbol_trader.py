@@ -262,6 +262,7 @@ class SymbolTrader:
             result["order"] = {"ok": False, "message": "stop loss required but not computed"}
             return result
 
+        rebalance_band = float(self.app_config.get("risk", {}).get("rebalance_band", 0.15))
         reconciliation = self.executor.reconcile_target(
             symbol=self.symbol,
             side=target_signal,
@@ -270,6 +271,7 @@ class SymbolTrader:
             comment=f"lr_{decision.regime[:8]}",
             magic=self.MAGIC,
             sl=decision_lots.stop_loss,
+            rebalance_band=rebalance_band,
         )
         result["order"] = reconciliation.as_dict()
         self._record_closed_trades(reconciliation)

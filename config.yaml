@@ -46,6 +46,7 @@ risk:
   gap_buffer_mult: 1.25     # inflate stop for gap risk in sizing
   max_open_risk_fraction: 0.25  # total open risk / equity
   max_margin_fraction: 0.50     # free-margin usage cap
+  rebalance_band: 0.15          # same-side lot drift ignored below 15%; else delta only
 
 validator:
   lookback_months: 6

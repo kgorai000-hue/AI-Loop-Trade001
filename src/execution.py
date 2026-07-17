@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -378,8 +379,13 @@ class OrderExecutor:
         commission = float(getattr(position, "commission", 0.0) or 0.0)
         return profit + swap + commission
 
-    def close_position_market(self, position: Any, magic: int = 260717) -> OrderResult:
-        """Close one exact MT5 position ticket using a market deal."""
+    def close_position_market(
+        self,
+        position: Any,
+        magic: int = 260717,
+        volume: Optional[float] = None,
+    ) -> OrderResult:
+        """Close one MT5 position ticket at market (full or partial volume)."""
         allowed, reason = self.can_execute()
         symbol = str(position.symbol)
         if not self.connection.ensure():
@@ -389,12 +395,21 @@ class OrderExecutor:
         if tick is None or info is None:
             return OrderResult(ok=False, message="missing tick/info")
 
+        pos_volume = float(position.volume)
+        close_volume = pos_volume if volume is None else min(pos_volume, float(volume))
+        if close_volume <= 0:
+            return OrderResult(ok=False, message="close volume <= 0")
+
+        # Scale mark-to-market PnL for partial closes.
         closed_pnl = self._position_closed_pnl(position)
+        if pos_volume > 0 and close_volume < pos_volume:
+            closed_pnl *= close_volume / pos_volume
+
         is_buy = position.type == mt5.POSITION_TYPE_BUY
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": symbol,
-            "volume": float(position.volume),
+            "volume": float(close_volume),
             "type": mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY,
             "position": int(position.ticket),
             "price": float(tick.bid if is_buy else tick.ask),
@@ -436,13 +451,13 @@ class OrderExecutor:
         comment: str = "lr_loop",
         magic: int = 260717,
         sl: Optional[float] = None,
+        rebalance_band: float = 0.15,
     ) -> ReconcileResult:
         """Move managed positions toward one desired side/volume without stacking.
 
-        Reversals and resizes use close-then-open. Target satisfaction is
-        ``filled volume + same-side pending remainder`` (RETURN partial fills).
-        Matching working exposure uses ``await_fill`` and must not cancel the
-        residual pending. MT5 query failures abort trading paths.
+        Same-side exposure uses entry-sized lots within ``rebalance_band`` (relative).
+        Outside the band, only the delta is topped up or trimmed — not a full
+        close/re-open. Target match is filled + same-side pending (RETURN partials).
         """
         positions = self.managed_positions(symbol, magic=magic)
         pending = self.managed_pending(symbol, magic=magic)
@@ -456,6 +471,7 @@ class OrderExecutor:
         }
         current_volume = sum(float(p.volume) for p in positions)
         tolerance = max(float(volume_step), 1e-9) / 2.0
+        band = max(0.0, float(rebalance_band))
 
         if side == Signal.FLAT or volume <= 0:
             cancel_err = self._require_pending_cleared(symbol, magic=magic)
@@ -481,8 +497,6 @@ class OrderExecutor:
                 return self._fetch_failed("orders", symbol)
 
             dry = any(r.dry_run for r in closes)
-            # Live flat success: positions=0 and pending=0. Dry-run closes do not
-            # remove positions, so only pending clearance is enforced there.
             if pending_after or (positions_after and not dry):
                 return ReconcileResult(
                     ok=False,
@@ -521,14 +535,13 @@ class OrderExecutor:
             return ReconcileResult(ok=True, action="hold", message="target already satisfied")
 
         # RETURN partial fill: position + same-side pending remainder == target.
-        await_fill = self._working_exposure_matches_target(
+        if self._working_exposure_matches_target(
             side=side,
             target_volume=float(volume),
             positions=positions,
             pending=pending,
             tolerance=tolerance,
-        )
-        if await_fill:
+        ):
             logger.info(
                 "Awaiting fill symbol=%s side=%s target=%s filled=%s pending=%s",
                 symbol,
@@ -547,6 +560,42 @@ class OrderExecutor:
                 message="working exposure matches target (filled + same-side pending)",
             )
 
+        same_side = self._same_side_exposure_clean(
+            side=side, positions=positions, pending=pending
+        )
+        if same_side:
+            filled, pending_vol, working = same_side
+            basis = max(working, float(volume), 1e-12)
+            rel = abs(working - float(volume)) / basis
+            if rel <= band:
+                # Entry-sized hold: ignore equity-driven micro lot changes.
+                if pending_vol > 0 and working > float(volume) + tolerance:
+                    cancel_err = self._require_pending_cleared(symbol, magic=magic)
+                    if cancel_err is not None:
+                        return cancel_err
+                return ReconcileResult(
+                    ok=True,
+                    action="hold",
+                    message=(
+                        f"within rebalance band ({rel:.1%} <= {band:.0%}); "
+                        f"keeping working={working:.4f} vs target={float(volume):.4f}"
+                    ),
+                )
+            return self._delta_rebalance_same_side(
+                symbol=symbol,
+                side=side,
+                target_volume=float(volume),
+                volume_step=volume_step,
+                tolerance=tolerance,
+                comment=comment,
+                magic=magic,
+                sl=sl,
+                filled=filled,
+                pending_vol=pending_vol,
+                working=working,
+            )
+
+        # Side change or mixed exposure — conservative close-then-open.
         cancel_err = self._require_pending_cleared(symbol, magic=magic)
         if cancel_err is not None:
             return cancel_err
@@ -562,7 +611,6 @@ class OrderExecutor:
                 orders=closes,
             )
 
-        # Re-check before new entry: no managed pending may remain.
         pending_before_entry = self.managed_pending(symbol, magic=magic)
         if pending_before_entry is None:
             return self._fetch_failed("orders", symbol)
@@ -602,6 +650,133 @@ class OrderExecutor:
             dry_run=entry.dry_run or any(r.dry_run for r in closes),
             orders=closes + [entry],
         )
+
+    def _same_side_exposure_clean(
+        self,
+        *,
+        side: Signal,
+        positions: list[Any],
+        pending: list[Any],
+    ) -> Optional[tuple[float, float, float]]:
+        """Return (filled, pending_vol, working) when all exposure is ``side``."""
+        position_sides = {
+            Signal.LONG if p.type == mt5.POSITION_TYPE_BUY else Signal.SHORT for p in positions
+        }
+        if len(position_sides) > 1:
+            return None
+        if position_sides and side not in position_sides:
+            return None
+        pending_sides = {self._pending_side(o) for o in pending}
+        pending_sides.discard(None)
+        if any(s != side for s in pending_sides):
+            return None
+        filled = sum(float(p.volume) for p in positions) if side in position_sides else 0.0
+        pending_vol = sum(
+            self._pending_volume(o) for o in pending if self._pending_side(o) == side
+        )
+        working = filled + pending_vol
+        if working <= 0:
+            return None
+        return filled, pending_vol, working
+
+    def _delta_rebalance_same_side(
+        self,
+        *,
+        symbol: str,
+        side: Signal,
+        target_volume: float,
+        volume_step: float,
+        tolerance: float,
+        comment: str,
+        magic: int,
+        sl: Optional[float],
+        filled: float,
+        pending_vol: float,
+        working: float,
+    ) -> ReconcileResult:
+        """Top up or trim only the delta versus target on the same side."""
+        delta = target_volume - working
+        if delta > tolerance:
+            add_vol = self._round_volume_up(delta, volume_step)
+            if add_vol <= 0:
+                return ReconcileResult(
+                    ok=True,
+                    action="hold",
+                    message=f"top-up delta {delta} below volume step",
+                )
+            entry = self.place_limit(
+                OrderRequest(
+                    symbol=symbol,
+                    side=side,
+                    volume=float(add_vol),
+                    price=0.0,
+                    comment=comment,
+                    magic=magic,
+                    sl=sl,
+                )
+            )
+            if entry.ok and not entry.dry_run:
+                entry.message = f"top-up {add_vol} awaiting fill ({entry.message})"
+            return ReconcileResult(
+                ok=entry.ok,
+                action="top_up",
+                message=entry.message,
+                dry_run=entry.dry_run,
+                orders=[entry],
+            )
+
+        # Trim: clear residual pendings first, then partial-close filled excess.
+        cancel_err = self._require_pending_cleared(symbol, magic=magic)
+        if cancel_err is not None:
+            return cancel_err
+        positions = self.managed_positions(symbol, magic=magic)
+        if positions is None:
+            return self._fetch_failed("positions", symbol)
+        filled_now = sum(float(p.volume) for p in positions)
+        excess = filled_now - target_volume
+        if excess <= tolerance:
+            return ReconcileResult(
+                ok=True,
+                action="hold",
+                message="trimmed pending; filled already near target",
+            )
+        closes = self._partial_close_volume(positions, excess, magic=magic)
+        if any(not r.ok for r in closes):
+            return ReconcileResult(
+                ok=False,
+                action="close_failed",
+                message="partial trim failed",
+                dry_run=any(r.dry_run for r in closes),
+                orders=closes,
+            )
+        return ReconcileResult(
+            ok=True,
+            action="trim",
+            message=f"trimmed excess={excess:.4f} toward target={target_volume:.4f}",
+            dry_run=any(r.dry_run for r in closes),
+            orders=closes,
+        )
+
+    def _partial_close_volume(
+        self, positions: list[Any], excess: float, magic: int
+    ) -> list[OrderResult]:
+        remaining = float(excess)
+        results: list[OrderResult] = []
+        for position in positions:
+            if remaining <= 0:
+                break
+            slice_vol = min(float(position.volume), remaining)
+            result = self.close_position_market(position, magic=magic, volume=slice_vol)
+            results.append(result)
+            if result.ok:
+                remaining -= slice_vol
+        return results
+
+    @staticmethod
+    def _round_volume_up(volume: float, step: float) -> float:
+        if step <= 0:
+            return float(volume)
+        return float(math.floor(volume / step + 1e-12) * step)
 
     def _working_exposure_matches_target(
         self,

@@ -117,6 +117,99 @@ def test_partial_fill_plus_remainder_pending_awaits_fill(monkeypatch):
     assert sent == []
 
 
+def test_same_side_within_rebalance_band_holds_without_churn(monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        mt5,
+        "positions_get",
+        lambda **kwargs: [_position(Signal.LONG, volume=1.0)],
+    )
+    monkeypatch.setattr(mt5, "orders_get", lambda **kwargs: [])
+    monkeypatch.setattr(mt5, "order_send", lambda request: sent.append(request))
+
+    executor = OrderExecutor(Connection(), execute=True, account_type="demo")
+    # ~10% drift from equity change — inside default 15% band
+    result = executor.reconcile_target(
+        symbol="#US30", side=Signal.LONG, volume=1.10, rebalance_band=0.15
+    )
+
+    assert result.ok is True
+    assert result.action == "hold"
+    assert "rebalance band" in result.message
+    assert sent == []
+
+
+def test_same_side_top_up_places_delta_only(monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        mt5,
+        "positions_get",
+        lambda **kwargs: [_position(Signal.LONG, volume=1.0, ticket=77)],
+    )
+    monkeypatch.setattr(mt5, "orders_get", lambda **kwargs: [])
+    monkeypatch.setattr(
+        mt5,
+        "symbol_info_tick",
+        lambda symbol: SimpleNamespace(bid=40000.0, ask=40001.0),
+    )
+
+    def order_send(request):
+        sent.append(request)
+        return SimpleNamespace(
+            retcode=mt5.TRADE_RETCODE_PLACED, order=1, deal=0, comment="placed"
+        )
+
+    monkeypatch.setattr(mt5, "order_send", order_send)
+    executor = OrderExecutor(Connection(), execute=True, account_type="demo")
+    result = executor.reconcile_target(
+        symbol="#US30",
+        side=Signal.LONG,
+        volume=1.5,
+        sl=39500.0,
+        rebalance_band=0.15,
+    )
+
+    assert result.ok is True
+    assert result.action == "top_up"
+    assert len(sent) == 1
+    assert sent[0]["action"] == mt5.TRADE_ACTION_PENDING
+    assert sent[0]["volume"] == 0.5
+
+
+def test_same_side_trim_partial_closes_excess(monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        mt5,
+        "positions_get",
+        lambda **kwargs: [_position(Signal.LONG, volume=1.0, ticket=77)],
+    )
+    monkeypatch.setattr(mt5, "orders_get", lambda **kwargs: [])
+    monkeypatch.setattr(
+        mt5,
+        "symbol_info_tick",
+        lambda symbol: SimpleNamespace(bid=40000.0, ask=40001.0),
+    )
+
+    def order_send(request):
+        sent.append(request)
+        return SimpleNamespace(
+            retcode=mt5.TRADE_RETCODE_DONE, order=1, deal=2, comment="done"
+        )
+
+    monkeypatch.setattr(mt5, "order_send", order_send)
+    executor = OrderExecutor(Connection(), execute=True, account_type="demo")
+    result = executor.reconcile_target(
+        symbol="#US30", side=Signal.LONG, volume=0.5, rebalance_band=0.15
+    )
+
+    assert result.ok is True
+    assert result.action == "trim"
+    assert len(sent) == 1
+    assert sent[0]["action"] == mt5.TRADE_ACTION_DEAL
+    assert sent[0]["volume"] == 0.5
+    assert sent[0]["position"] == 77
+
+
 def test_reversal_closes_exact_ticket_before_new_entry(monkeypatch):
     sent = []
     monkeypatch.setattr(
