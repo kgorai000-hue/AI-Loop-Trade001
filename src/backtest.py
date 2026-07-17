@@ -8,7 +8,7 @@ from typing import Any, Optional
 import numpy as np
 import pandas as pd
 
-from .metrics import BARS_PER_YEAR_M30, PerformanceReport, build_report
+from .metrics import BARS_PER_YEAR_M30, PerformanceReport, build_report, market_forward_returns
 from .risk import CostModel, RiskManager
 from .strategy import RegressionStrategy, StrategyParams
 
@@ -740,6 +740,7 @@ class Backtester:
         bar_series = pd.Series(bar_rets, index=annotated.index)
         bar_series.iloc[:warmup] = 0.0
         sig_series = pd.Series(signals, index=annotated.index)
+        mkt_fwd = market_forward_returns(annotated["close"])
         report_initial = float(self.account.initial_equity) if self.account.enabled else 1.0
         report = build_report(
             bar_series,
@@ -747,6 +748,7 @@ class Backtester:
             trade_pnls=trade_pnls,
             periods_per_year=self.periods_per_year,
             initial_equity=report_initial,
+            market_forward_returns=mkt_fwd,
         )
         return BacktestResult(
             report=report,
@@ -784,12 +786,14 @@ class Backtester:
             oos_rets = oos_full.bar_returns.iloc[warmup:].reset_index(drop=True)
             oos_sigs = oos_full.signals.iloc[warmup:].reset_index(drop=True)
             oos_trades = [t for t in oos_full.trades if t["entry_i"] >= warmup]
+            oos_mkt = market_forward_returns(oos_df["close"]).reset_index(drop=True)
             oos_report = build_report(
                 oos_rets,
                 signals=oos_sigs,
                 trade_pnls=[t["pnl"] for t in oos_trades],
                 periods_per_year=self.periods_per_year,
                 initial_equity=report_initial,
+                market_forward_returns=oos_mkt,
             )
             oos_result = BacktestResult(
                 report=oos_report,

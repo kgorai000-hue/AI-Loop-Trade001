@@ -13,7 +13,7 @@ from .anthropic_client import AnthropicClient
 from .backtest import Backtester, BacktestResult
 from .checker import StrategyChecker
 from .maker import StrategyMaker
-from .metrics import build_report
+from .metrics import build_report, market_forward_returns
 from .optimizer import OptimizeOutcome, ParameterOptimizer
 from .persistence import StateStore
 from .risk import CostModel
@@ -286,6 +286,8 @@ class IntelligenceLoop:
         rets = full.bar_returns.iloc[warm:].reset_index(drop=True)
         sigs = full.signals.iloc[warm:].reset_index(drop=True)
         trades = [t for t in full.trades if t["entry_i"] >= warm]
+        seg = combined.iloc[warm:].reset_index(drop=True)
+        mkt_fwd = market_forward_returns(seg["close"])
         report = build_report(
             rets,
             signals=sigs,
@@ -296,6 +298,7 @@ class IntelligenceLoop:
                 if self.backtester.account.enabled
                 else 1.0
             ),
+            market_forward_returns=mkt_fwd,
         )
         return BacktestResult(
             report=report,

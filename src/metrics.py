@@ -81,18 +81,28 @@ def returns_pvalue(returns: pd.Series) -> float:
 
 
 def information_coefficient(signals: pd.Series, forward_returns: pd.Series) -> float:
-    """Spearman rank IC between signal and next-bar (or forward) return."""
+    """Spearman rank IC between signal and raw next-bar market return.
+
+    ``forward_returns[i]`` must be the instrument price return from bar ``i`` to
+    ``i+1`` (e.g. ``close[i+1]/close[i] - 1``), not strategy equity returns.
+    """
     aligned = pd.concat([signals, forward_returns], axis=1).dropna()
     if len(aligned) < 5:
         return 0.0
-    a = aligned.iloc[:, 0].to_numpy()
-    b = aligned.iloc[:, 1].to_numpy()
+    a = aligned.iloc[:, 0].to_numpy(dtype=float)
+    b = aligned.iloc[:, 1].to_numpy(dtype=float)
     if np.std(a) < 1e-12 or np.std(b) < 1e-12:
         return 0.0
     corr, _ = stats.spearmanr(a, b)
     if np.isnan(corr):
         return 0.0
     return float(corr)
+
+
+def market_forward_returns(close: pd.Series) -> pd.Series:
+    """Raw next-bar price return: ``close[t+1] / close[t] - 1`` (last bar is NaN)."""
+    c = pd.to_numeric(close, errors="coerce")
+    return c.shift(-1) / c - 1.0
 
 
 def oos_degradation(
@@ -133,6 +143,7 @@ def build_report(
     trade_pnls: Optional[list[float]] = None,
     periods_per_year: float = BARS_PER_YEAR_M30,
     initial_equity: float = 1.0,
+    market_forward_returns: Optional[pd.Series] = None,
 ) -> PerformanceReport:
     initial = float(initial_equity) if initial_equity and initial_equity > 0 else 1.0
     equity = equity_from_returns(bar_returns, initial=initial)
@@ -142,9 +153,8 @@ def build_report(
     p = returns_pvalue(bar_returns)
 
     ic = 0.0
-    if signals is not None:
-        fwd = bar_returns.shift(-1)
-        ic = information_coefficient(signals, fwd)
+    if signals is not None and market_forward_returns is not None:
+        ic = information_coefficient(signals, market_forward_returns)
 
     wr, rr, n = trade_stats(trade_pnls or [])
     return PerformanceReport(
