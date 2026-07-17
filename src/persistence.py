@@ -85,6 +85,8 @@ class StateStore:
             "equity_peak": None,
             "locked": False,
             "last_maker_run": None,
+            "last_processed_bar": None,
+            "recent_pnls": [],
         }
 
     def _ensure_files(self) -> None:

@@ -141,6 +141,48 @@ def test_on_new_bar_uses_same_completed_bar_for_detection_and_decision():
     assert output["bar_time"] == str(frame["time"].iloc[-1])
     assert executor.targets[-1]["side"] == Signal.LONG
     assert executor.targets[-1]["sl"] == 95.0
+    assert trader.store.state["last_processed_bar"] == frame["time"].iloc[-1].isoformat()
+
+
+def test_on_new_bar_skips_already_processed_bar_after_restart():
+    frame = pd.DataFrame(
+        {
+            "time": pd.date_range("2026-01-01", periods=8, freq="30min", tz="UTC"),
+            "close": [1, 2, 3, 4, 5, 6, 7, 8],
+        }
+    )
+    store = Store()
+    store.state["last_processed_bar"] = frame["time"].iloc[-1].isoformat()
+    trader, _ = _trader(frame)
+    trader.store = store
+    trader._last_bar_time = trader._load_last_processed_bar()
+
+    assert trader.on_new_bar() is None
+    assert trader.feed.calls == [1]
+
+
+def test_on_new_bar_does_not_advance_when_trade_fails():
+    frame = pd.DataFrame(
+        {
+            "time": pd.date_range("2026-01-01", periods=8, freq="30min", tz="UTC"),
+            "close": [1, 2, 3, 4, 5, 6, 7, 8],
+        }
+    )
+    trader, _ = _trader(frame)
+    trader.feed.tick = lambda: None
+
+    out = trader.on_new_bar()
+    assert out is not None
+    assert out["order"]["ok"] is False
+    assert trader.store.state.get("last_processed_bar") is None
+    assert trader._last_bar_time is None
+
+    # Retry succeeds after market data returns.
+    trader.feed.tick = lambda: SimpleNamespace(bid=100.0, ask=101.0)
+    out2 = trader.on_new_bar()
+    assert out2 is not None
+    assert out2["order"]["ok"] is True
+    assert trader.store.state["last_processed_bar"] == frame["time"].iloc[-1].isoformat()
 
 
 def test_max_hold_forces_flat_target():

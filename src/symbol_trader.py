@@ -73,7 +73,7 @@ class SymbolTrader:
             )
         self.strategy = RegressionStrategy(params)
         self.feed = DataFeed(connection, symbol_cfg.name, symbol_cfg.timeframe)
-        self._last_bar_time = None
+        self._last_bar_time = self._load_last_processed_bar()
         self._regime_counts = {"trend": 0, "mean_reversion": 0, "unknown": 0}
         history = self.store.read_state().get("recent_pnls") or []
         if isinstance(history, list) and history:
@@ -331,30 +331,83 @@ class SymbolTrader:
         if recorded:
             self.store.update_state(recent_pnls=list(self.risk.recent_pnls))
 
+    def _load_last_processed_bar(self) -> Optional[pd.Timestamp]:
+        raw = self.store.read_state().get("last_processed_bar")
+        if raw is None or raw == "":
+            return None
+        try:
+            ts = pd.Timestamp(raw)
+        except (TypeError, ValueError):
+            logger.warning("%s: invalid last_processed_bar=%r", self.symbol, raw)
+            return None
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        return ts
+
+    @staticmethod
+    def _normalize_bar_time(bar_time: Any) -> pd.Timestamp:
+        ts = pd.Timestamp(bar_time)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        return ts
+
+    def _commit_processed_bar(self, bar_time: Any) -> None:
+        ts = self._normalize_bar_time(bar_time)
+        self._last_bar_time = ts
+        self.store.update_state(last_processed_bar=ts.isoformat())
+
+    @staticmethod
+    def _should_commit_bar(result: dict[str, Any]) -> bool:
+        """Persist cursor only after the bar was fully handled (or intentionally skipped)."""
+        order = result.get("order")
+        if not isinstance(order, dict):
+            return False
+        if order.get("ok"):
+            return True
+        message = str(order.get("message", ""))
+        # Sizing declined the trade for this bar — still a completed decision.
+        if message.startswith("lots=0") or "lots=0 (" in message:
+            return True
+        return False
+
     def on_new_bar(self) -> Optional[dict[str, Any]]:
-        """Run once for each newly completed bar."""
+        """Run once for each newly completed bar; commit cursor only on success."""
         df = self.feed.copy_closed_rates(1)
         if df is None or df.empty:
             return None
-        bar_time = df["time"].iloc[-1]
+        bar_time = self._normalize_bar_time(df["time"].iloc[-1])
         if self._last_bar_time is not None and bar_time <= self._last_bar_time:
             return None
-        self._last_bar_time = bar_time
 
         decision = self.evaluate()
         if decision is None:
+            logger.warning(
+                "%s bar=%s evaluate failed; last_processed_bar not advanced",
+                self.symbol,
+                bar_time,
+            )
             return None
         decision.bar_time = bar_time
         out = self.maybe_trade(decision)
         out["bar_time"] = str(bar_time)
+        if self._should_commit_bar(out):
+            self._commit_processed_bar(bar_time)
+        else:
+            logger.warning(
+                "%s bar=%s trade incomplete (%s); will retry same bar",
+                self.symbol,
+                bar_time,
+                (out.get("order") or {}).get("message"),
+            )
         logger.info(
-            "%s bar=%s signal=%s regime=%s bL=%.6f bS=%.6f",
+            "%s bar=%s signal=%s regime=%s bL=%.6f bS=%.6f committed=%s",
             self.symbol,
             bar_time,
             decision.signal.name,
             decision.regime,
             decision.b_long,
             decision.b_short,
+            self._last_bar_time == bar_time,
         )
         return out
 
