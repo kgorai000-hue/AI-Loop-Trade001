@@ -86,6 +86,12 @@ validator:
   block_bootstrap_block_bars: 48  # ~1 trading day of M30
   multiple_testing: bonferroni  # none | bonferroni | fdr_bh
   # n_tests: 0                  # 0 → use candidate count from optimizer/LLM
+  pvalue_method: max            # iid | hac | block_bootstrap | max (HAC∪bootstrap)
+  hac_lags: 0                   # 0 → Newey–West automatic bandwidth
+  min_dsr: 0.95                 # Deflated Sharpe Ratio floor (0 disables)
+  pbo_enabled: true
+  pbo_max: 0.50                 # CSCV Probability of Backtest Overfitting ceiling
+  pbo_slices: 8                 # even CSCV partitions (8 → C(8,4)=70 combos)
 
 optimizer:
   long_windows: [180, 200, 220, 240, 260, 280]

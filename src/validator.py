@@ -8,10 +8,13 @@ from typing import Optional
 import pandas as pd
 
 from .backtest import BacktestResult, Backtester
-from .metrics import (
+from .inference import (
     adjust_alpha,
     block_bootstrap_mean_pvalue,
+    deflated_sharpe_ratio,
+    hac_mean_pvalue,
     regime_trade_counts,
+    returns_pvalue,
 )
 from .strategy import Regime, StrategyParams
 
@@ -36,6 +39,14 @@ class ValidatorConfig:
     block_bootstrap_block_bars: int = 48
     multiple_testing: str = "bonferroni"  # none | bonferroni | fdr_bh
     n_tests: int = 0  # 0 → use per-call n_tests or 1
+    # Dependence-aware inference + selection bias
+    # pvalue_method: iid | hac | block_bootstrap | max (max of HAC & bootstrap)
+    pvalue_method: str = "max"
+    hac_lags: int = 0  # 0 → Newey–West automatic bandwidth
+    min_dsr: float = 0.95  # Deflated Sharpe Ratio floor (0 disables)
+    pbo_max: float = 0.50  # Probability of Backtest Overfitting ceiling
+    pbo_slices: int = 8  # CSCV partitions (even)
+    pbo_enabled: bool = True
 
 
 @dataclass
@@ -55,6 +66,11 @@ class ValidationResult:
     oos_n_trades: int = 0
     regime_trades: dict = field(default_factory=dict)
     p_value_threshold: float = 0.05
+    dsr: float = 0.0
+    sr_star: float = 0.0
+    hac_p_value: float = 1.0
+    bootstrap_p_value: float = 1.0
+    pbo: Optional[float] = None
 
     def as_dict(self) -> dict:
         return {
@@ -73,6 +89,11 @@ class ValidationResult:
             "oos_n_trades": self.oos_n_trades,
             "regime_trades": dict(self.regime_trades),
             "p_value_threshold": self.p_value_threshold,
+            "dsr": self.dsr,
+            "sr_star": self.sr_star,
+            "hac_p_value": self.hac_p_value,
+            "bootstrap_p_value": self.bootstrap_p_value,
+            "pbo": self.pbo,
         }
 
 
@@ -80,13 +101,52 @@ class StrategyValidator:
     """
     Reject variants that fail any gate:
     - max DD / Sharpe band / OOS degradation
-    - block-bootstrap p-value (multiple-testing adjusted)
+    - HAC and/or block-bootstrap p-value (multiple-testing adjusted)
+    - Deflated Sharpe Ratio vs selection-bias threshold
     - full-sample and OOS trade counts
     - per-regime trade counts (trend / mean_reversion)
     """
 
     def __init__(self, config: Optional[ValidatorConfig] = None) -> None:
         self.config = config or ValidatorConfig()
+
+    def _infer_p_values(
+        self, bar_returns: pd.Series
+    ) -> tuple[float, float, float, list[str]]:
+        """Return (gate_p, hac_p, boot_p, flags)."""
+        cfg = self.config
+        flags: list[str] = []
+        method = (cfg.pvalue_method or "max").lower()
+        hac_p = hac_mean_pvalue(bar_returns, lags=cfg.hac_lags)
+        boot_p = 1.0
+        if cfg.block_bootstrap_reps > 0 and method in (
+            "block_bootstrap",
+            "bootstrap",
+            "max",
+            "both",
+        ):
+            boot_p = block_bootstrap_mean_pvalue(
+                bar_returns,
+                block_size=cfg.block_bootstrap_block_bars,
+                n_boot=cfg.block_bootstrap_reps,
+            )
+            flags.append("p_value_block_bootstrap")
+
+        if method in ("iid", "t", "ttest"):
+            p = returns_pvalue(bar_returns)
+            flags.append("p_value_iid_ttest")
+        elif method in ("hac", "newey_west", "nw"):
+            p = hac_p
+            flags.append("p_value_hac")
+        elif method in ("block_bootstrap", "bootstrap"):
+            p = boot_p if cfg.block_bootstrap_reps > 0 else hac_p
+        else:
+            # max / both: require the more conservative (larger) p
+            p = max(hac_p, boot_p) if cfg.block_bootstrap_reps > 0 else hac_p
+            flags.append("p_value_hac")
+            if cfg.block_bootstrap_reps > 0:
+                flags.append("p_value_max_hac_bootstrap")
+        return float(p), float(hac_p), float(boot_p), flags
 
     def validate_reports(
         self,
@@ -97,6 +157,7 @@ class StrategyValidator:
         *,
         check_oos_trades: bool = True,
         n_tests: Optional[int] = None,
+        pbo: Optional[float] = None,
     ) -> ValidationResult:
         cfg = self.config
         reasons: list[str] = []
@@ -109,18 +170,12 @@ class StrategyValidator:
         n_trades = int(full.report.n_trades)
         oos_n_trades = int(oos_result.report.n_trades)
 
-        if cfg.block_bootstrap_reps > 0:
-            p = block_bootstrap_mean_pvalue(
-                full.bar_returns,
-                block_size=cfg.block_bootstrap_block_bars,
-                n_boot=cfg.block_bootstrap_reps,
-            )
-            flags.append("p_value_block_bootstrap")
-        else:
-            p = full.report.p_value
-
         tests = int(n_tests) if n_tests is not None and n_tests > 0 else int(cfg.n_tests or 1)
+        p, hac_p, boot_p, p_flags = self._infer_p_values(full.bar_returns)
+        flags.extend(p_flags)
         p_threshold = adjust_alpha(cfg.p_value_max, tests, cfg.multiple_testing)
+
+        dsr, sr_star, _sr = deflated_sharpe_ratio(full.bar_returns, n_trials=tests)
 
         if dd >= cfg.max_drawdown:
             reasons.append(f"max_drawdown {dd:.4f} >= {cfg.max_drawdown}")
@@ -135,8 +190,22 @@ class StrategyValidator:
         if p >= p_threshold:
             reasons.append(
                 f"p_value {p:.4f} >= {p_threshold:.6f} "
-                f"(alpha={cfg.p_value_max}, n_tests={tests}, method={cfg.multiple_testing})"
+                f"(alpha={cfg.p_value_max}, n_tests={tests}, method={cfg.multiple_testing}, "
+                f"pvalue={cfg.pvalue_method})"
             )
+
+        if cfg.min_dsr > 0 and dsr < cfg.min_dsr:
+            reasons.append(
+                f"deflated_sharpe {dsr:.4f} < {cfg.min_dsr} "
+                f"(sr_star={sr_star:.6f}, n_trials={tests})"
+            )
+            flags.append("dsr_gate")
+
+        if pbo is not None and cfg.pbo_enabled and cfg.pbo_max < 1.0:
+            if pbo > cfg.pbo_max:
+                reasons.append(f"pbo {pbo:.4f} > {cfg.pbo_max}")
+                flags.append("pbo_gate")
+                overfitting = True
 
         if oos_deg > cfg.oos_degradation_max:
             reasons.append(
@@ -151,7 +220,6 @@ class StrategyValidator:
                     f"insufficient_oos_trades {oos_n_trades} < {cfg.min_oos_trades}"
                 )
         elif n_trades < cfg.min_oos_trades:
-            # Holdout / single-window gate: OOS-level sample size only.
             reasons.append(
                 f"insufficient_trades {n_trades} < {cfg.min_oos_trades}"
             )
@@ -194,6 +262,11 @@ class StrategyValidator:
             oos_n_trades=oos_n_trades,
             regime_trades=regime_counts,
             p_value_threshold=p_threshold,
+            dsr=dsr,
+            sr_star=sr_star,
+            hac_p_value=hac_p,
+            bootstrap_p_value=boot_p,
+            pbo=pbo,
         )
 
     def validate(
@@ -204,6 +277,7 @@ class StrategyValidator:
         *,
         apply_oos_gate: bool = True,
         n_tests: Optional[int] = None,
+        pbo: Optional[float] = None,
     ) -> tuple[ValidationResult, BacktestResult]:
         """Validate params on ``df``.
 
@@ -226,6 +300,7 @@ class StrategyValidator:
             deg,
             check_oos_trades=apply_oos_gate,
             n_tests=n_tests,
+            pbo=pbo,
         )
         return result, full
 
@@ -249,4 +324,10 @@ class StrategyValidator:
             block_bootstrap_block_bars=int(vcfg.get("block_bootstrap_block_bars", 48)),
             multiple_testing=str(vcfg.get("multiple_testing", "bonferroni")),
             n_tests=int(vcfg.get("n_tests", 0)),
+            pvalue_method=str(vcfg.get("pvalue_method", "max")),
+            hac_lags=int(vcfg.get("hac_lags", 0)),
+            min_dsr=float(vcfg.get("min_dsr", 0.95)),
+            pbo_max=float(vcfg.get("pbo_max", 0.50)),
+            pbo_slices=int(vcfg.get("pbo_slices", 8)),
+            pbo_enabled=bool(vcfg.get("pbo_enabled", True)),
         )

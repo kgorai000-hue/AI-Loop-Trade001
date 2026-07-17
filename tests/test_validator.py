@@ -108,6 +108,9 @@ def test_validator_rejects_low_trade_counts():
         p_value_max=1.0,
         oos_degradation_max=1.0,
         max_drawdown=1.0,
+        min_dsr=0.0,
+        pbo_enabled=False,
+        pvalue_method="hac",
     )
     v = StrategyValidator(cfg)
     full = _result(n_trades=5)
@@ -130,6 +133,9 @@ def test_validator_holdout_uses_oos_floor():
         p_value_max=1.0,
         oos_degradation_max=1.0,
         max_drawdown=1.0,
+        min_dsr=0.0,
+        pbo_enabled=False,
+        pvalue_method="hac",
     )
     v = StrategyValidator(cfg)
     holdout = _result(n_trades=20)
@@ -151,6 +157,8 @@ def test_validator_regime_and_bonferroni():
         [Regime.TREND] * 30 + [Regime.MEAN_REVERSION] * 30
     )
     trades = [{"entry_i": i, "pnl": 0.01} for i in range(8)]  # all trend
+    # Near-zero returns → high HAC p; Bonferroni tightens further.
+    flat = pd.Series(np.zeros(60))
     cfg = ValidatorConfig(
         min_trades=5,
         min_oos_trades=1,
@@ -162,10 +170,18 @@ def test_validator_regime_and_bonferroni():
         p_value_max=0.05,
         oos_degradation_max=1.0,
         max_drawdown=1.0,
+        min_dsr=0.0,
+        pbo_enabled=False,
+        pvalue_method="hac",
     )
     v = StrategyValidator(cfg)
-    full = _result(n_trades=8, p_value=0.01, trades=trades, regimes=regimes)
-    # p=0.01 fails Bonferroni vs n_tests=10 → 0.005
+    full = _result(
+        n_trades=8,
+        p_value=0.01,
+        trades=trades,
+        regimes=regimes,
+        bar_returns=flat,
+    )
     res = v.validate_reports(full, full, full, 0.0, n_tests=10)
     assert not res.accepted
     assert abs(res.p_value_threshold - 0.005) < 1e-12
@@ -182,6 +198,10 @@ def test_config_from_dict_loads_new_keys():
             "block_bootstrap_reps": 100,
             "block_bootstrap_block_bars": 24,
             "multiple_testing": "fdr_bh",
+            "pvalue_method": "hac",
+            "min_dsr": 0.9,
+            "pbo_max": 0.4,
+            "pbo_slices": 10,
         }
     )
     assert cfg.min_trades == 45
@@ -189,3 +209,66 @@ def test_config_from_dict_loads_new_keys():
     assert cfg.min_regime_trades == 12
     assert cfg.block_bootstrap_reps == 100
     assert cfg.multiple_testing == "fdr_bh"
+    assert cfg.pvalue_method == "hac"
+    assert cfg.min_dsr == 0.9
+    assert cfg.pbo_max == 0.4
+    assert cfg.pbo_slices == 10
+
+
+def test_hac_inflates_p_under_autocorrelation():
+    from src.metrics import hac_mean_pvalue, returns_pvalue
+
+    rng = np.random.default_rng(7)
+    e = rng.normal(0.0, 0.01, size=500)
+    # AR(1) with mild positive drift — IID t-test overstates significance.
+    r = np.zeros(500)
+    for i in range(1, 500):
+        r[i] = 0.6 * r[i - 1] + e[i] + 0.0003
+    s = pd.Series(r)
+    p_iid = returns_pvalue(s)
+    p_hac = hac_mean_pvalue(s, lags=20)
+    assert p_hac >= p_iid * 0.9  # HAC typically larger (more conservative)
+
+
+def test_deflated_sharpe_penalizes_many_trials():
+    from src.metrics import deflated_sharpe_ratio
+
+    rng = np.random.default_rng(3)
+    edged = pd.Series(rng.normal(0.0015, 0.01, size=600))
+    dsr1, _, _ = deflated_sharpe_ratio(edged, n_trials=1)
+    dsr_many, sr_star, _ = deflated_sharpe_ratio(edged, n_trials=120)
+    assert dsr1 > dsr_many
+    assert sr_star > 0.0
+
+
+def test_pbo_high_when_noise_strategies():
+    from src.metrics import probability_of_backtest_overfitting
+
+    rng = np.random.default_rng(11)
+    # Unrelated noise strategies → high PBO
+    mat = rng.normal(0.0, 0.01, size=(400, 20))
+    pbo = probability_of_backtest_overfitting(mat, n_slices=8)
+    assert pbo > 0.3
+
+
+def test_validator_dsr_gate():
+    cfg = ValidatorConfig(
+        min_trades=1,
+        min_oos_trades=1,
+        min_regime_trades=0,
+        block_bootstrap_reps=0,
+        multiple_testing="none",
+        sharpe_min=0.0,
+        sharpe_max=100.0,
+        p_value_max=1.0,
+        oos_degradation_max=1.0,
+        max_drawdown=1.0,
+        min_dsr=0.99,
+        pbo_enabled=False,
+        pvalue_method="hac",
+    )
+    v = StrategyValidator(cfg)
+    weak = _result(n_trades=50, bar_returns=pd.Series(np.zeros(100)))
+    res = v.validate_reports(weak, weak, weak, 0.0, n_tests=50)
+    assert not res.accepted
+    assert any("deflated_sharpe" in r for r in res.reasons)

@@ -12,6 +12,8 @@ import pandas as pd
 from .backtest import Backtester
 from .persistence import StateStore
 from .risk import CostModel
+# Backward-compatible re-exports (prefer ``src.search``).
+from .search import apply_pbo_gate, compute_search_pbo, validation_ranking_row  # noqa: F401
 from .strategy import StrategyParams
 from .validator import StrategyValidator, ValidationResult
 
@@ -32,6 +34,7 @@ class OptimizeOutcome:
     tried: int
     accepted_count: int
     rankings: list[dict[str, Any]] = field(default_factory=list)
+    pbo: Optional[float] = None
 
 
 class ParameterOptimizer:
@@ -75,6 +78,7 @@ class ParameterOptimizer:
         best_params: Optional[StrategyParams] = None
         best_val: Optional[ValidationResult] = None
         accepted_count = 0
+        return_series: list[pd.Series] = []
 
         candidates = self._candidate_params()
         n_tests = max(len(candidates), 1)
@@ -89,27 +93,12 @@ class ParameterOptimizer:
                 logger.warning("Candidate %s failed: %s", params.as_dict(), exc)
                 continue
 
-            row = {
-                "params": params.as_dict(),
-                "accepted": val.accepted,
-                "sharpe": val.sharpe,
-                "max_drawdown": val.max_drawdown,
-                "p_value": val.p_value,
-                "ic": val.ic,
-                "oos_degradation": val.oos_degradation,
-                "overfitting": val.overfitting,
-                "reasons": val.reasons,
-                "n_trades": val.n_trades,
-                "oos_n_trades": val.oos_n_trades,
-                "regime_trades": val.regime_trades,
-                "p_value_threshold": val.p_value_threshold,
-            }
-            rankings.append(row)
+            return_series.append(full.bar_returns)
+            rankings.append(validation_ranking_row(val, params))
 
             if val.accepted:
                 accepted_count += 1
                 if best_val is None or val.sharpe > best_val.sharpe:
-                    # Prefer higher Sharpe within [1.5, 3.0]
                     best_val = val
                     best_params = params
             elif val.overfitting and self.state_store:
@@ -117,10 +106,19 @@ class ParameterOptimizer:
                     f"Rejected overfitting sharpe={val.sharpe:.2f} params={params.as_dict()}"
                 )
 
+        best_params, best_val, accepted_count, pbo = apply_pbo_gate(
+            validator=self.validator,
+            state_store=self.state_store,
+            best_params=best_params,
+            best_val=best_val,
+            accepted_count=accepted_count,
+            rankings=rankings,
+            return_series=return_series,
+        )
+
         rankings.sort(key=lambda r: (r["accepted"], r["sharpe"]), reverse=True)
 
         if best_params is None and rankings:
-            # Record top failure reason into SKILL for next cycle
             top = rankings[0]
             if self.state_store and top.get("reasons"):
                 self.state_store.append_lesson(
@@ -133,6 +131,7 @@ class ParameterOptimizer:
             tried=len(candidates),
             accepted_count=accepted_count,
             rankings=rankings,
+            pbo=pbo,
         )
 
     @classmethod

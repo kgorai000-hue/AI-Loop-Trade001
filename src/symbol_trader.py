@@ -481,11 +481,18 @@ class SymbolTrader:
                 "p_value": v.p_value,
                 "ic": v.ic,
                 "oos_degradation": v.oos_degradation,
+                "dsr": v.dsr,
+                "hac_p_value": v.hac_p_value,
+                "bootstrap_p_value": v.bootstrap_p_value,
             }
             if outcome.outer_mean_sharpe is not None:
                 metrics["outer_mean_sharpe"] = outcome.outer_mean_sharpe
             if outcome.holdout_validation is not None:
                 metrics["holdout_sharpe"] = outcome.holdout_validation.sharpe
+            if outcome.pbo is not None:
+                metrics["pbo"] = outcome.pbo
+            elif v.pbo is not None:
+                metrics["pbo"] = v.pbo
             self.store.update_state(
                 params=outcome.best_params.as_dict(),
                 accepted=True,
@@ -517,6 +524,7 @@ class SymbolTrader:
             ),
             "fold_results": outcome.fold_results,
             "top": outcome.rankings[:5],
+            "pbo": outcome.pbo,
         }
 
     def metrics_degraded(self, sharpe_trigger: float = 0.20, ic_trigger: float = 0.20) -> bool:

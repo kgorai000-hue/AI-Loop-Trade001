@@ -13,10 +13,10 @@ from .anthropic_client import AnthropicClient
 from .backtest import Backtester, BacktestResult
 from .checker import StrategyChecker
 from .maker import StrategyMaker
-from .metrics import build_report, market_forward_returns
 from .optimizer import OptimizeOutcome, ParameterOptimizer
 from .persistence import StateStore
 from .risk import CostModel
+from .search import apply_pbo_gate, validation_ranking_row
 from .splits import chronological_holdout, walk_forward_folds, with_warmup
 from .strategy import StrategyParams
 from .validator import StrategyValidator, ValidationResult
@@ -37,6 +37,7 @@ class IntelligenceOutcome:
     fold_results: list[dict[str, Any]] = field(default_factory=list)
     holdout_validation: Optional[ValidationResult] = None
     outer_mean_sharpe: Optional[float] = None
+    pbo: Optional[float] = None
 
 
 class IntelligenceLoop:
@@ -288,48 +289,8 @@ class IntelligenceLoop:
         full = self.backtester.run(combined, params=params)
         if warm <= 0 or len(full.bar_returns) <= warm:
             return full
-        rets = full.bar_returns.iloc[warm:].reset_index(drop=True)
-        sigs = full.signals.iloc[warm:].reset_index(drop=True)
-        trades = []
-        for t in full.trades:
-            if t["entry_i"] < warm:
-                continue
-            nt = dict(t)
-            nt["entry_i"] = int(t["entry_i"]) - warm
-            if t.get("exit_i") is not None:
-                nt["exit_i"] = int(t["exit_i"]) - warm
-            trades.append(nt)
-        regimes = None
-        if full.regimes is not None:
-            regimes = full.regimes.iloc[warm:].reset_index(drop=True)
         seg = combined.iloc[warm:].reset_index(drop=True)
-        mkt_fwd = market_forward_returns(seg["close"])
-        report = build_report(
-            rets,
-            signals=sigs,
-            trade_pnls=[t["pnl"] for t in trades],
-            periods_per_year=self.backtester.periods_per_year,
-            initial_equity=(
-                float(self.backtester.account.initial_equity)
-                if self.backtester.account.enabled
-                else 1.0
-            ),
-            market_forward_returns=mkt_fwd,
-        )
-        return BacktestResult(
-            report=report,
-            trades=trades,
-            bar_returns=rets,
-            signals=sigs,
-            params=params,
-            unfilled_entries=full.unfilled_entries,
-            liquidations=full.liquidations,
-            skipped_entries=full.skipped_entries,
-            fill_model=full.fill_model,
-            account_config=full.account_config,
-            final_equity=full.final_equity,
-            regimes=regimes,
-        )
+        return self.backtester.trim_warmup(full, warm, close=seg["close"])
 
     def _run_llm(self, df: pd.DataFrame) -> IntelligenceOutcome:
         state = self.state_store.read_state()
@@ -372,6 +333,7 @@ class IntelligenceLoop:
         best_params: Optional[StrategyParams] = None
         best_val: Optional[ValidationResult] = None
         accepted_count = 0
+        return_series: list = []
 
         n_tests = max(maker_n, len(approved), 1)
         for rev in approved:
@@ -389,24 +351,15 @@ class IntelligenceLoop:
                 )
                 continue
 
-            row = {
-                "params": rev.params.as_dict(),
-                "accepted": val.accepted,
-                "sharpe": val.sharpe,
-                "max_drawdown": val.max_drawdown,
-                "p_value": val.p_value,
-                "ic": val.ic,
-                "oos_degradation": val.oos_degradation,
-                "overfitting": val.overfitting,
-                "reasons": val.reasons,
-                "n_trades": val.n_trades,
-                "oos_n_trades": val.oos_n_trades,
-                "regime_trades": val.regime_trades,
-                "p_value_threshold": val.p_value_threshold,
-                "source": "llm",
-                "checker_reason": rev.reason,
-            }
-            rankings.append(row)
+            return_series.append(full.bar_returns)
+            rankings.append(
+                validation_ranking_row(
+                    val,
+                    rev.params,
+                    source="llm",
+                    checker_reason=rev.reason,
+                )
+            )
 
             if val.accepted:
                 accepted_count += 1
@@ -424,6 +377,15 @@ class IntelligenceLoop:
                         f"params={rev.params.as_dict()}"
                     )
 
+        best_params, best_val, accepted_count, pbo = apply_pbo_gate(
+            validator=self.validator,
+            state_store=self.state_store,
+            best_params=best_params,
+            best_val=best_val,
+            accepted_count=accepted_count,
+            rankings=rankings,
+            return_series=return_series,
+        )
         rankings.sort(key=lambda r: (r["accepted"], r["sharpe"]), reverse=True)
         return IntelligenceOutcome(
             best_params=best_params,
@@ -434,6 +396,7 @@ class IntelligenceLoop:
             rankings=rankings,
             checker_rejected=len(rejected),
             maker_proposed=maker_n,
+            pbo=pbo,
         )
 
     def _run_grid(self, df: pd.DataFrame) -> IntelligenceOutcome:
@@ -452,4 +415,5 @@ class IntelligenceLoop:
             accepted_count=outcome.accepted_count,
             path="grid_fallback",
             rankings=outcome.rankings,
+            pbo=outcome.pbo,
         )

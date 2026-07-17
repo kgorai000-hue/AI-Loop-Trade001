@@ -770,6 +770,65 @@ class Backtester:
             regimes=regime_series,
         )
 
+    def trim_warmup(
+        self,
+        result: BacktestResult,
+        warmup: int,
+        *,
+        close: Optional[pd.Series] = None,
+    ) -> BacktestResult:
+        """Drop the leading ``warmup`` bars and reindex trade entry/exit indices.
+
+        When ``close`` is provided (aligned to the post-warmup window), IC uses
+        raw next-bar market returns on that segment.
+        """
+        warm = max(0, int(warmup))
+        if warm <= 0 or len(result.bar_returns) <= warm:
+            return result
+
+        rets = result.bar_returns.iloc[warm:].reset_index(drop=True)
+        sigs = result.signals.iloc[warm:].reset_index(drop=True)
+        trades: list[dict] = []
+        for t in result.trades:
+            if t["entry_i"] < warm:
+                continue
+            nt = dict(t)
+            nt["entry_i"] = int(t["entry_i"]) - warm
+            if t.get("exit_i") is not None:
+                nt["exit_i"] = int(t["exit_i"]) - warm
+            trades.append(nt)
+        regimes = None
+        if result.regimes is not None:
+            regimes = result.regimes.iloc[warm:].reset_index(drop=True)
+
+        mkt_fwd = None
+        if close is not None:
+            mkt_fwd = market_forward_returns(close).reset_index(drop=True)
+
+        report_initial = float(self.account.initial_equity) if self.account.enabled else 1.0
+        report = build_report(
+            rets,
+            signals=sigs,
+            trade_pnls=[t["pnl"] for t in trades],
+            periods_per_year=self.periods_per_year,
+            initial_equity=report_initial,
+            market_forward_returns=mkt_fwd,
+        )
+        return BacktestResult(
+            report=report,
+            trades=trades,
+            bar_returns=rets,
+            signals=sigs,
+            params=result.params,
+            unfilled_entries=result.unfilled_entries,
+            liquidations=result.liquidations,
+            skipped_entries=result.skipped_entries,
+            fill_model=result.fill_model,
+            account_config=result.account_config,
+            final_equity=result.final_equity,
+            regimes=regimes,
+        )
+
     def run_is_oos(
         self,
         df: pd.DataFrame,
@@ -785,47 +844,10 @@ class Backtester:
         oos_df = df.iloc[split:].reset_index(drop=True)
 
         warmup = params.long_window
-        report_initial = float(self.account.initial_equity) if self.account.enabled else 1.0
         if len(is_df) >= warmup and len(oos_df) > 0:
             oos_with_warm = pd.concat([is_df.iloc[-warmup:], oos_df], ignore_index=True)
             oos_full = self.run(oos_with_warm, params=params)
-            oos_rets = oos_full.bar_returns.iloc[warmup:].reset_index(drop=True)
-            oos_sigs = oos_full.signals.iloc[warmup:].reset_index(drop=True)
-            oos_trades = []
-            for t in oos_full.trades:
-                if t["entry_i"] < warmup:
-                    continue
-                nt = dict(t)
-                nt["entry_i"] = int(t["entry_i"]) - warmup
-                if t.get("exit_i") is not None:
-                    nt["exit_i"] = int(t["exit_i"]) - warmup
-                oos_trades.append(nt)
-            oos_mkt = market_forward_returns(oos_df["close"]).reset_index(drop=True)
-            oos_regimes = None
-            if oos_full.regimes is not None:
-                oos_regimes = oos_full.regimes.iloc[warmup:].reset_index(drop=True)
-            oos_report = build_report(
-                oos_rets,
-                signals=oos_sigs,
-                trade_pnls=[t["pnl"] for t in oos_trades],
-                periods_per_year=self.periods_per_year,
-                initial_equity=report_initial,
-                market_forward_returns=oos_mkt,
-            )
-            oos_result = BacktestResult(
-                report=oos_report,
-                trades=oos_trades,
-                bar_returns=oos_rets,
-                signals=oos_sigs,
-                params=params,
-                unfilled_entries=oos_full.unfilled_entries,
-                liquidations=oos_full.liquidations,
-                skipped_entries=oos_full.skipped_entries,
-                fill_model=self.fill_model,
-                account_config=self.account,
-                final_equity=oos_full.final_equity,
-                regimes=oos_regimes,
-            )
+            oos_result = self.trim_warmup(oos_full, warmup, close=oos_df["close"])
         else:
             oos_result = self.run(oos_df, params=params)
 

@@ -98,6 +98,9 @@ def test_run_nested_holdout_not_used_for_fold_selection(monkeypatch):
             min_regime_trades=0,
             block_bootstrap_reps=0,
             multiple_testing="none",
+            min_dsr=0.0,
+            pbo_enabled=False,
+            pvalue_method="hac",
         )
     )
 
@@ -143,6 +146,9 @@ def test_validate_can_skip_oos_gate_for_holdout():
             min_regime_trades=0,
             block_bootstrap_reps=0,
             multiple_testing="none",
+            min_dsr=0.0,
+            pbo_enabled=False,
+            pvalue_method="hac",
         )
     )
     bt = Backtester(
