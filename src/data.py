@@ -7,7 +7,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import MetaTrader5 as mt5
-import numpy as np
 import pandas as pd
 
 from .connection import MT5Connection
@@ -41,7 +40,11 @@ class DataFeed:
         return info is not None
 
     def copy_rates(self, count: int, start_pos: int = 0) -> Optional[pd.DataFrame]:
-        """Return the last `count` bars as a DataFrame (oldest first)."""
+        """Return `count` bars as a DataFrame, oldest first.
+
+        MT5 position 0 is the currently forming bar. Callers that make trading
+        decisions should use :meth:`copy_closed_rates` instead.
+        """
         if not self.connection.ensure() or not self.ensure_symbol():
             return None
         rates = mt5.copy_rates_from_pos(self.symbol, self.timeframe, start_pos, count)
@@ -54,6 +57,10 @@ class DataFeed:
             )
             return None
         return self._to_df(rates)
+
+    def copy_closed_rates(self, count: int) -> Optional[pd.DataFrame]:
+        """Return only completed bars, excluding MT5's forming bar at position 0."""
+        return self.copy_rates(count=count, start_pos=1)
 
     def copy_rates_range(
         self,
@@ -82,12 +89,18 @@ class DataFeed:
     def last_n_months(self, months: int = 6, pad_bars: int = 300) -> Optional[pd.DataFrame]:
         """Fetch ~`months` of history plus warmup bars for indicators."""
         now = datetime.now(timezone.utc)
-        # Approximate calendar months; pad for warmup
         date_from = now - timedelta(days=int(months * 30.5) + 5)
         df = self.copy_rates_range(date_from, now)
         if df is None:
-            # Fallback: estimate bars for M30 (~48 bars/day)
-            bars_per_day = {"M1": 1440, "M5": 288, "M15": 96, "M30": 48, "H1": 24, "H4": 6, "D1": 1}
+            bars_per_day = {
+                "M1": 1440,
+                "M5": 288,
+                "M15": 96,
+                "M30": 48,
+                "H1": 24,
+                "H4": 6,
+                "D1": 1,
+            }
             per_day = bars_per_day.get(self.timeframe_name, 48)
             count = int(months * 30.5 * per_day) + pad_bars
             df = self.copy_rates(count)
