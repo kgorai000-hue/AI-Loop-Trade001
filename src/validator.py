@@ -216,6 +216,9 @@ class StrategyValidator:
         n_tests: Optional[int] = None,
         pbo: Optional[float] = None,
         defer_p_value_gate: bool = False,
+        trial_sharpes: Optional[list[float]] = None,
+        sr_trials_std: Optional[float] = None,
+        defer_dsr_gate: Optional[bool] = None,
     ) -> ValidationResult:
         cfg = self.config
         reasons: list[str] = []
@@ -236,7 +239,24 @@ class StrategyValidator:
         # True FDR-BH needs the full p-value family; defer until search post-process.
         defer_p = defer_p_value_gate or mt in ("fdr", "fdr_bh", "bh")
 
-        dsr, sr_star, _sr = deflated_sharpe_ratio(full.bar_returns, n_trials=tests)
+        has_family = trial_sharpes is not None or sr_trials_std is not None
+        # Multi-trial DSR needs cross-sectional Sharpe dispersion; defer until the
+        # search family is known (see apply_dsr_family_gate).
+        if defer_dsr_gate is None:
+            defer_dsr = bool(cfg.min_dsr > 0 and tests > 1 and not has_family)
+        else:
+            defer_dsr = bool(defer_dsr_gate)
+
+        dsr, sr_star, _sr = deflated_sharpe_ratio(
+            full.bar_returns,
+            n_trials=tests,
+            trial_sharpes=trial_sharpes,
+            sr_trials_std=sr_trials_std,
+        )
+        if defer_dsr:
+            flags.append("dsr_gate_deferred_family")
+        elif not has_family and tests > 1:
+            flags.append("dsr_trials_std_from_estimation_se")
 
         if dd >= cfg.max_drawdown:
             reasons.append(f"max_drawdown {dd:.4f} >= {cfg.max_drawdown}")
@@ -257,7 +277,7 @@ class StrategyValidator:
         elif defer_p:
             flags.append("p_value_gate_deferred_fdr_bh")
 
-        if cfg.min_dsr > 0 and dsr < cfg.min_dsr:
+        if cfg.min_dsr > 0 and not defer_dsr and dsr < cfg.min_dsr:
             reasons.append(
                 f"deflated_sharpe {dsr:.4f} < {cfg.min_dsr} "
                 f"(sr_star={sr_star:.6f}, n_trials={tests})"

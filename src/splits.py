@@ -126,13 +126,17 @@ def walk_forward_folds(
 
     Fold ``i`` uses ``df[:test_start]`` as train and the next contiguous
     block as outer OOS. Train never includes that fold's OOS.
+
+    ``min_train`` is ``max(min_train_bars, floor(n * min_train_fraction))`` and
+    is enforced on every accepted fold (not only when sizing the OOS remainder).
     """
     n = len(df)
     folds_n = max(1, int(n_folds))
-    if n < min_train_bars + min_test_bars:
+    frac = min(max(float(min_train_fraction), 0.0), 0.95)
+    min_train = max(int(min_train_bars), int(n * frac))
+    if n < min_train + int(min_test_bars):
         return []
 
-    min_train = max(min_train_bars, int(n * float(min_train_fraction)))
     remaining = n - min_train
     if remaining < min_test_bars:
         return []
@@ -142,7 +146,7 @@ def walk_forward_folds(
     for i in range(folds_n):
         test_end = n - (folds_n - 1 - i) * fold_oos
         test_start = test_end - fold_oos
-        if test_start < min_train_bars:
+        if test_start < min_train:
             continue
         if test_end > n:
             test_end = n
@@ -150,7 +154,7 @@ def walk_forward_folds(
             continue
         train = df.iloc[:test_start].reset_index(drop=True)
         test = df.iloc[test_start:test_end].reset_index(drop=True)
-        if len(train) < min_train_bars or len(test) < min_test_bars:
+        if len(train) < min_train or len(test) < min_test_bars:
             continue
         folds.append((train, test))
     return folds

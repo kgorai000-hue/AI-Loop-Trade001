@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 from .connection import MT5Connection
@@ -23,6 +24,7 @@ class LoopEngine:
     - Polls every `poll_seconds` for new closed bars.
     - On configured weekday/hour, runs review sub-loop (metric check → optimize).
     - KillSwitchMonitor thread flattens and locks on account DD breach.
+    - Each SymbolTrader owns its own RiskManager (per-symbol Kelly history).
     """
 
     def __init__(self, config: dict[str, Any]) -> None:
@@ -44,14 +46,25 @@ class LoopEngine:
             allow_live=bool(config.get("allow_live", False)),
         )
         risk_cfg = config.get("risk", {})
-        self.risk = RiskManager.from_config(risk_cfg)
+        # Per-symbol RiskManagers: Kelly ``recent_pnls`` lives in each STATE and must
+        # not share one in-memory history (last symbol would overwrite the others).
+        # Account equity / kill-switch remain process-wide; sizing history is local.
+        self.risk_cfg = risk_cfg if isinstance(risk_cfg, dict) else {}
         loop_cfg = config.get("loop", {})
         self.poll_seconds = int(loop_cfg.get("poll_seconds", 30))
         self.review_weekday = int(loop_cfg.get("review_weekday", 5))
         self.review_hour_utc = int(loop_cfg.get("review_hour_utc", 6))
         self._last_review_date: Optional[str] = None
 
-        state_dir = config.get("paths", {}).get("state_dir", "state")
+        state_dir = Path(config.get("paths", {}).get("state_dir", "state"))
+        if not state_dir.is_absolute():
+            # Relative state_dir follows process cwd — Task Scheduler often leaves
+            # "Start in" empty, which would orphan kill-switch / bar / PnL state.
+            raise ValueError(
+                f"paths.state_dir must be absolute (got {state_dir!r}); "
+                "use main.load_config() so relative paths resolve against the "
+                "config file directory"
+            )
         strat = config.get("strategy", {})
         self.traders: list[SymbolTrader] = []
         for sc in config.get("symbols", []):
@@ -71,7 +84,7 @@ class LoopEngine:
                 symbol_cfg=sym_cfg,
                 connection=self.connection,
                 executor=self.executor,
-                risk=self.risk,
+                risk=RiskManager.from_config(self.risk_cfg),
                 state_store=store,
                 app_config=config,
             )

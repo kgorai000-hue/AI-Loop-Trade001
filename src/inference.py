@@ -65,17 +65,75 @@ def hac_mean_pvalue(returns: pd.Series, *, lags: int = 0) -> float:
     return min(1.0, max(0.0, p))
 
 
+def circular_block_resample(
+    data: np.ndarray,
+    *,
+    block: int,
+    starts: np.ndarray,
+) -> np.ndarray:
+    """Concatenate fixed-length circular blocks and truncate to ``len(data)``.
+
+    Each start index wraps with modulo ``n`` (Politis & Romano circular block
+    bootstrap), so every block has exactly ``block`` observations — unlike a
+    naive end-truncated slice that shortens blocks near the series tail.
+    """
+    x = np.asarray(data, dtype=float)
+    n = len(x)
+    block = max(1, int(block))
+    if n == 0:
+        return x.copy()
+    starts = np.asarray(starts, dtype=int).reshape(-1)
+    # shape (n_blocks, block) → fixed-length indices with wrap-around
+    idx = (starts[:, None] + np.arange(block, dtype=int)[None, :]) % n
+    return x[idx.ravel()[:n]]
+
+
+def moving_block_resample(
+    data: np.ndarray,
+    *,
+    block: int,
+    starts: np.ndarray,
+) -> np.ndarray:
+    """Concatenate fixed-length moving blocks (no wrap); truncate to ``len(data)``.
+
+    ``starts`` must lie in ``[0, n - block]`` so each block is exactly ``block``
+    long (Künsch moving-block bootstrap).
+    """
+    x = np.asarray(data, dtype=float)
+    n = len(x)
+    block = max(1, int(block))
+    if n == 0:
+        return x.copy()
+    if block > n:
+        raise ValueError(f"block ({block}) exceeds series length ({n})")
+    starts = np.asarray(starts, dtype=int).reshape(-1)
+    if np.any(starts < 0) or np.any(starts > n - block):
+        raise ValueError(
+            f"moving-block starts must be in [0, {n - block}], got "
+            f"[{int(starts.min())}, {int(starts.max())}]"
+        )
+    idx = starts[:, None] + np.arange(block, dtype=int)[None, :]
+    return x[idx.ravel()[:n]]
+
+
 def block_bootstrap_mean_pvalue(
     returns: pd.Series,
     *,
     block_size: int = 48,
     n_boot: int = 400,
     seed: int = 42,
+    scheme: str = "circular",
 ) -> float:
     """Two-sided block-bootstrap p-value for H0: E[r] = 0.
 
-    Returns are recentered under H0; contiguous blocks are resampled to preserve
-    serial dependence. Falls back to HAC when the series is too short.
+    Returns are recentered under H0; contiguous **fixed-length** blocks are
+    resampled to preserve serial dependence.
+
+    ``scheme``:
+    - ``circular`` (default): wrap-around blocks; starts uniform on ``{0..n-1}``
+    - ``moving``: non-wrapping blocks; starts uniform on ``{0..n-block}``
+
+    Falls back to HAC when the series is too short.
     """
     r = returns.fillna(0.0).to_numpy(dtype=float)
     n = len(r)
@@ -89,17 +147,24 @@ def block_bootstrap_mean_pvalue(
     centered = r - obs
     rng = np.random.default_rng(int(seed))
     n_blocks = int(np.ceil(n / block))
+    scheme_l = (scheme or "circular").strip().lower()
+    if scheme_l not in ("circular", "moving"):
+        raise ValueError(f"unknown block bootstrap scheme: {scheme!r}")
     extremes = 0
     for _ in range(boots):
-        starts = rng.integers(0, n, size=n_blocks)
-        pieces = [centered[s : s + block] for s in starts]
-        sample = np.concatenate(pieces)[:n]
+        if scheme_l == "moving":
+            starts = rng.integers(0, n - block + 1, size=n_blocks)
+            sample = moving_block_resample(centered, block=block, starts=starts)
+        else:
+            starts = rng.integers(0, n, size=n_blocks)
+            sample = circular_block_resample(centered, block=block, starts=starts)
         if abs(float(sample.mean())) >= abs(obs):
             extremes += 1
     return float((extremes + 1) / (boots + 1))
 
 
-def _nonannual_sharpe(r: np.ndarray) -> float:
+def nonannual_sharpe(r: np.ndarray) -> float:
+    """Non-annualized Sharpe (mean / sample std) for a return vector."""
     if len(r) < 2:
         return 0.0
     std = float(r.std(ddof=1))
@@ -108,41 +173,88 @@ def _nonannual_sharpe(r: np.ndarray) -> float:
     return float(r.mean() / std)
 
 
+# Backward-compatible alias
+_nonannual_sharpe = nonannual_sharpe
+
+
 def sharpe_ratio_variance(sr: float, n: int, skew: float, kurt: float) -> float:
     """Estimated variance of the non-annualized Sharpe ratio (Lo / BLP)."""
     n = max(2, int(n))
     return (1.0 - skew * sr + ((kurt - 1.0) / 4.0) * (sr**2)) / (n - 1)
 
 
-def expected_max_sharpe(n_trials: int, sr_std: float) -> float:
-    """Expected maximum Sharpe under multiple testing (Bailey & López de Prado)."""
+def trial_sharpe_dispersion(
+    trial_sharpes: list[float] | np.ndarray,
+    *,
+    ddof: int = 1,
+) -> tuple[float, float]:
+    """Cross-sectional mean and std of non-annualized Sharpes across trials.
+
+    This is the selection-bias scale ``σ_{{SR_n}}`` in Bailey & López de Prado —
+    not the estimation SE of a single strategy's Sharpe.
+    """
+    arr = np.asarray(list(trial_sharpes), dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if len(arr) == 0:
+        return 0.0, 0.0
+    mean = float(arr.mean())
+    if len(arr) == 1:
+        return mean, 0.0
+    std = float(arr.std(ddof=max(0, int(ddof))))
+    if np.isnan(std):
+        std = 0.0
+    return mean, max(0.0, std)
+
+
+def expected_max_sharpe(
+    n_trials: int,
+    sr_trials_std: float,
+    *,
+    mean_sr: float = 0.0,
+) -> float:
+    """Expected maximum Sharpe under multiple testing (Bailey & López de Prado).
+
+    ``sr_trials_std`` is the **cross-trial** standard deviation of Sharpe ratios
+    across the N candidates (selection-bias scale), not a single-strategy
+    estimation standard error.
+    """
     n = max(1, int(n_trials))
-    sigma = max(0.0, float(sr_std))
+    sigma = max(0.0, float(sr_trials_std))
+    mu = float(mean_sr)
     if n <= 1 or sigma <= 0.0:
-        return 0.0
+        return mu
     emc = 0.5772156649015329  # Euler–Mascheroni
     z1 = stats.norm.ppf(1.0 - 1.0 / n)
     z2 = stats.norm.ppf(1.0 - 1.0 / (n * np.e))
     if np.isnan(z1) or np.isnan(z2):
-        return 0.0
-    return float(sigma * ((1.0 - emc) * z1 + emc * z2))
+        return mu
+    return float(mu + sigma * ((1.0 - emc) * z1 + emc * z2))
 
 
 def deflated_sharpe_ratio(
     returns: pd.Series,
     *,
     n_trials: int = 1,
+    trial_sharpes: list[float] | np.ndarray | None = None,
+    sr_trials_std: float | None = None,
+    sr_trials_mean: float | None = None,
 ) -> tuple[float, float, float]:
     """Deflated Sharpe Ratio (Bailey & López de Prado 2014).
 
-    Returns ``(dsr, sr_star, nonannual_sr)`` where ``dsr = Φ[(SR−SR*)/√V]``
-    is the probability that the true SR exceeds the multiple-testing threshold SR*.
+    Returns ``(dsr, sr_star, nonannual_sr)`` where
+    ``dsr = Φ[(SR − SR*) / √V̂[SR]]``.
+
+    - ``√V̂[SR]``: estimation variance of *this* strategy's Sharpe (skew/kurt).
+    - ``SR* = E[max SR_n]``: uses the **cross-trial** Sharpe dispersion
+      (``trial_sharpes`` / ``sr_trials_std``). Under a homogeneous null with
+      no family provided, falls back to ``√V̂[SR]`` (same scale as independent
+      zero-true-SR estimators) — prefer passing the candidate family.
     """
     r = returns.fillna(0.0).to_numpy(dtype=float)
     n = len(r)
     if n < 5 or np.allclose(r, 0.0):
         return 0.0, 0.0, 0.0
-    sr = _nonannual_sharpe(r)
+    sr = nonannual_sharpe(r)
     skew = float(stats.skew(r, bias=False))
     kurt = float(stats.kurtosis(r, fisher=False, bias=False))  # Pearson kurtosis
     if np.isnan(skew):
@@ -152,9 +264,31 @@ def deflated_sharpe_ratio(
     var_sr = sharpe_ratio_variance(sr, n, skew, kurt)
     if var_sr <= 0.0 or np.isnan(var_sr):
         return 0.0, 0.0, sr
-    sr_std = float(np.sqrt(var_sr))
-    sr_star = expected_max_sharpe(n_trials, sr_std)
-    z = (sr - sr_star) / sr_std
+    sr_se = float(np.sqrt(var_sr))  # estimation SE (DSR denominator)
+
+    # Selection-bias scale: family dispersion of Sharpes, not sr_se.
+    mean_for_star = 0.0
+    if trial_sharpes is not None:
+        emp_mean, emp_std = trial_sharpe_dispersion(trial_sharpes)
+        trials_std = emp_std
+        if sr_trials_mean is not None:
+            mean_for_star = float(sr_trials_mean)
+        else:
+            # Null-centered threshold (avoid baking skill into SR*).
+            mean_for_star = 0.0
+        _ = emp_mean  # available for diagnostics; unused under null centering
+    elif sr_trials_std is not None:
+        trials_std = max(0.0, float(sr_trials_std))
+        mean_for_star = float(sr_trials_mean or 0.0)
+    else:
+        # Homogeneous-null approximation: cross-section var ≈ estimation var.
+        trials_std = sr_se
+        mean_for_star = float(sr_trials_mean or 0.0)
+
+    sr_star = expected_max_sharpe(
+        n_trials, trials_std, mean_sr=mean_for_star
+    )
+    z = (sr - sr_star) / sr_se
     dsr = float(stats.norm.cdf(z))
     if np.isnan(dsr):
         return 0.0, sr_star, sr

@@ -5,6 +5,9 @@ venv/
 .env
 .env.*
 !.env.example
+secrets.yaml
+secrets.*.yaml
+!secrets.example.yaml
 logs/*.log
 *.log
 .pytest_cache/

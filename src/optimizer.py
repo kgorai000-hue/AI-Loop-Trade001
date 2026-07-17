@@ -14,8 +14,10 @@ from .persistence import StateStore
 from .risk import CostModel
 # Backward-compatible re-exports (prefer ``src.search``).
 from .search import (  # noqa: F401
+    apply_dsr_family_gate,
     apply_fdr_bh_gate,
     apply_pbo_gate,
+    apply_search_family_gates,
     compute_search_pbo,
     validation_ranking_row,
 )
@@ -111,15 +113,7 @@ class ParameterOptimizer:
                     f"Rejected overfitting sharpe={val.sharpe:.2f} params={params.as_dict()}"
                 )
 
-        best_params, best_val, accepted_count = apply_fdr_bh_gate(
-            validator=self.validator,
-            best_params=best_params,
-            best_val=best_val,
-            accepted_count=accepted_count,
-            rankings=rankings,
-        )
-
-        best_params, best_val, accepted_count, pbo = apply_pbo_gate(
+        best_params, best_val, accepted_count, pbo = apply_search_family_gates(
             validator=self.validator,
             state_store=self.state_store,
             best_params=best_params,

@@ -58,6 +58,7 @@ class SymbolTrader:
         state_store: StateStore,
         app_config: dict[str, Any],
     ) -> None:
+        """``risk`` must be dedicated to this symbol (do not share across traders)."""
         self.cfg = symbol_cfg
         self.connection = connection
         self.executor = executor

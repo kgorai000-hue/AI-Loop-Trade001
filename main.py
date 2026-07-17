@@ -16,21 +16,42 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.config_paths import normalize_config_paths
 from src.loop_engine import LoopEngine
 from src.process_lock import ProcessLock
+from src.secrets import apply_mt5_credentials, load_dotenv
 
 
-def load_config(path: str | Path) -> dict[str, Any]:
-    path = Path(path)
+def load_config(path: str | Path, *, base: str | Path | None = None) -> dict[str, Any]:
+    """Load YAML config, apply secrets, and normalize relative paths.
+
+    ``base`` defaults to the config file's parent directory (stable under Task
+    Scheduler when "Start in" is empty). Absolute path settings are left as-is.
+
+    MT5 login/password come from ``.env`` / ``secrets.yaml`` / environment
+    variables — never from tracked ``config.yaml`` values.
+    """
+    path = Path(path).resolve()
+    config_dir = path.parent
+    # Prefer project .env, then config-dir .env (no override of existing env).
+    load_dotenv(ROOT / ".env")
+    if config_dir.resolve() != ROOT.resolve():
+        load_dotenv(config_dir / ".env")
+
     with path.open("r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
     if not isinstance(cfg, dict):
         raise ValueError("config root must be a mapping")
-    return cfg
+    root = Path(base).resolve() if base is not None else config_dir
+    apply_mt5_credentials(cfg, config_dir=config_dir)
+    return normalize_config_paths(cfg, root)
 
 
 def setup_logging(log_dir: str | Path) -> None:
     log_dir = Path(log_dir)
+    if not log_dir.is_absolute():
+        log_dir = ROOT / log_dir
+    log_dir = log_dir.resolve()
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "loop.log"
     fmt = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
@@ -149,12 +170,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     cfg = load_config(args.config)
-    log_dir = cfg.get("loop", {}).get("log_dir", "logs")
-    setup_logging(ROOT / log_dir if not Path(log_dir).is_absolute() else log_dir)
+    # log_dir / state_dir are absolute after load_config normalization.
+    setup_logging(cfg.get("loop", {}).get("log_dir", ROOT / "logs"))
 
     # Cross-process exclusive lock: prevents dual MT5 loops / kill-switches /
     # STATE writers when Task Scheduler and a manual start overlap.
-    state_dir = cfg.get("paths", {}).get("state_dir", "state")
+    state_dir = cfg.get("paths", {}).get("state_dir", str(ROOT / "state"))
     lock = ProcessLock.for_project(ROOT, state_dir)
     lock.acquire_or_exit(exit_code=1)
 

@@ -89,6 +89,28 @@ def test_walk_forward_folds_never_leak_future_into_train():
         assert train["time"].iloc[0] == df["time"].iloc[0]
 
 
+def test_walk_forward_enforces_min_train_fraction_not_just_bars():
+    """When min_test_bars inflates fold OOS, train must still meet fraction.
+
+    n=200, fraction=0.5 → min_train=100. With folds_n=3 and min_test_bars=40,
+    a naive check against min_train_bars=50 would accept a 80-bar train fold.
+    """
+    df = _frame(200)
+    folds = walk_forward_folds(
+        df,
+        n_folds=3,
+        min_train_fraction=0.5,
+        min_train_bars=50,
+        min_test_bars=40,
+    )
+    min_train = max(50, int(200 * 0.5))
+    assert min_train == 100
+    assert folds  # at least some folds remain
+    for train, test in folds:
+        assert len(train) >= min_train
+        assert len(test) >= 40
+
+
 def test_with_warmup_prepends_train_tail():
     df = _frame(50)
     train, test = df.iloc[:30], df.iloc[30:]

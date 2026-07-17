@@ -91,6 +91,7 @@ _WINDOWS = sys.platform.startswith("win")
 def test_mt5_module_importable():
     assert mt5 is not None
     assert hasattr(mt5, "order_send")
+    assert hasattr(mt5, "order_check")
     assert hasattr(mt5, "initialize")
     assert hasattr(mt5, "history_deals_get")
 
@@ -98,6 +99,24 @@ def test_mt5_module_importable():
 @pytest.mark.parametrize("name,expected", sorted(OFFICIAL_CONSTANTS.items()))
 def test_mt5_constants_match_official_wheel(name: str, expected: int):
     assert getattr(mt5, name) == expected
+
+
+def test_order_check_without_terminal_returns_none_or_result():
+    """No initialize() — must not crash; None or a CheckResult are both OK."""
+    result = mt5.order_check(
+        {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": "#US30",
+            "volume": 0.01,
+            "type": mt5.ORDER_TYPE_BUY,
+            "price": 1.0,
+            "deviation": 10,
+            "magic": 260717,
+            "comment": "ci",
+            "type_filling": mt5.ORDER_FILLING_IOC,
+        }
+    )
+    assert result is None or hasattr(result, "retcode")
 
 
 def test_order_send_without_terminal_returns_none():

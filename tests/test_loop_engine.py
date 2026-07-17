@@ -47,3 +47,32 @@ def test_last_review_date_persisted_across_engine_restart(tmp_path: Path):
     engine2 = LoopEngine(cfg)
     assert engine2._last_review_date == "2026-07-11"
     assert engine2.should_review(saturday) is False
+
+
+def test_loop_engine_rejects_relative_state_dir():
+    import pytest
+
+    cfg = _minimal_config("state")
+    with pytest.raises(ValueError, match="state_dir must be absolute"):
+        LoopEngine(cfg)
+
+
+def test_each_symbol_gets_independent_risk_manager(tmp_path: Path):
+    cfg = _minimal_config(str(tmp_path))
+    cfg["symbols"] = [
+        {"name": "#US30", "state_key": "US30", "enabled": True, "timeframe": "M30"},
+        {"name": "#US100", "state_key": "US100", "enabled": True, "timeframe": "M30"},
+    ]
+    StateStore(tmp_path, "US30").update_state(recent_pnls=[1.0, 2.0])
+    StateStore(tmp_path, "US100").update_state(recent_pnls=[10.0, 20.0, 30.0])
+
+    engine = LoopEngine(cfg)
+    assert len(engine.traders) == 2
+    a, b = engine.traders
+    assert a.risk is not b.risk
+    assert a.risk.recent_pnls == [1.0, 2.0]
+    assert b.risk.recent_pnls == [10.0, 20.0, 30.0]
+
+    a.risk.record_trade(3.0)
+    assert 3.0 in a.risk.recent_pnls
+    assert 3.0 not in b.risk.recent_pnls

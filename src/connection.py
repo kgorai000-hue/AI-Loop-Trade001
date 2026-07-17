@@ -322,6 +322,20 @@ class MT5Connection:
 
         return self.invoke(_op)
 
+    def order_check(self, request: dict[str, Any]) -> Any:
+        """Validate a trade request (margin, volume, stops, permissions, market).
+
+        Does not place an order. Callers must treat a failed / missing result as
+        fail-closed and must not call :meth:`order_send`.
+        """
+
+        def _op() -> Any:
+            if not self._ensure_unlocked():
+                return None
+            return mt5.order_check(request)
+
+        return self.invoke(_op)
+
     def order_send(self, request: dict[str, Any]) -> Any:
         def _op() -> Any:
             if not self._ensure_unlocked():

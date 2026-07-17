@@ -50,6 +50,7 @@ STUB_API_NAMES: tuple[str, ...] = (
     "symbol_info_tick",
     "positions_get",
     "orders_get",
+    "order_check",
     "order_send",
     "last_error",
     "initialize",

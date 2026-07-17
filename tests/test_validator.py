@@ -139,6 +139,37 @@ def test_block_bootstrap_detects_positive_drift():
     assert p < 0.05
 
 
+def test_circular_block_resample_fixed_length_at_tail():
+    from src.inference import circular_block_resample
+
+    data = np.arange(10, dtype=float)
+    # Start at index 8 with block=4 → must wrap: 8,9,0,1 (not a short 8,9)
+    out = circular_block_resample(data, block=4, starts=np.array([8, 2, 5]))
+    assert len(out) == 10
+    assert list(out[:4]) == [8.0, 9.0, 0.0, 1.0]
+
+
+def test_moving_block_resample_rejects_short_tail_starts():
+    from src.inference import moving_block_resample
+    import pytest
+
+    data = np.arange(10, dtype=float)
+    with pytest.raises(ValueError, match="moving-block starts"):
+        moving_block_resample(data, block=4, starts=np.array([7]))  # 7+4 > 10
+    out = moving_block_resample(data, block=4, starts=np.array([6, 0, 3]))
+    assert len(out) == 10
+    assert list(out[:4]) == [6.0, 7.0, 8.0, 9.0]
+
+
+def test_block_bootstrap_moving_scheme_runs():
+    rng = np.random.default_rng(3)
+    series = pd.Series(rng.normal(0.001, 0.01, size=300))
+    p = block_bootstrap_mean_pvalue(
+        series, block_size=25, n_boot=80, seed=3, scheme="moving"
+    )
+    assert 0.0 < p <= 1.0
+
+
 def test_regime_trade_counts():
     regimes = pd.Series(
         [Regime.TREND] * 5 + [Regime.MEAN_REVERSION] * 5
@@ -327,6 +358,56 @@ def test_deflated_sharpe_penalizes_many_trials():
     assert sr_star > 0.0
 
 
+def test_dsr_sr_star_uses_trial_dispersion_not_estimation_se():
+    from src.inference import deflated_sharpe_ratio, expected_max_sharpe, sharpe_ratio_variance
+    from scipy import stats as sp_stats
+
+    rng = np.random.default_rng(7)
+    edged = pd.Series(rng.normal(0.002, 0.01, size=500))
+    # Wide family of candidate Sharpes → larger SR* than homogeneous SE fallback.
+    family = list(rng.normal(0.0, 0.15, size=40))
+    _dsr_f, sr_star_f, sr = deflated_sharpe_ratio(
+        edged, n_trials=40, trial_sharpes=family
+    )
+    r = edged.to_numpy(dtype=float)
+    se = float(
+        np.sqrt(
+            sharpe_ratio_variance(
+                sr,
+                len(r),
+                float(sp_stats.skew(r, bias=False)),
+                float(sp_stats.kurtosis(r, fisher=False, bias=False)),
+            )
+        )
+    )
+    sr_star_se = expected_max_sharpe(40, se)
+    assert sr_star_f > sr_star_se
+
+
+def test_validator_defers_dsr_without_family():
+    cfg = ValidatorConfig(
+        min_trades=1,
+        min_oos_trades=1,
+        min_regime_trades=0,
+        block_bootstrap_reps=0,
+        multiple_testing="none",
+        sharpe_min=0.0,
+        sharpe_max=100.0,
+        p_value_max=1.0,
+        oos_degradation_max=1.0,
+        max_drawdown=1.0,
+        min_dsr=0.95,
+        pbo_enabled=False,
+        pvalue_method="hac",
+    )
+    v = StrategyValidator(cfg)
+    rng = np.random.default_rng(4)
+    full = _result(n_trades=50, bar_returns=pd.Series(rng.normal(0.001, 0.01, 200)))
+    res = v.validate_reports(full, full, full, 0.0, n_tests=50)
+    assert "dsr_gate_deferred_family" in res.flags
+    assert not any("deflated_sharpe" in r for r in res.reasons)
+
+
 def test_pbo_high_when_noise_strategies():
     from src.metrics import probability_of_backtest_overfitting
 
@@ -355,6 +436,7 @@ def test_validator_dsr_gate():
     )
     v = StrategyValidator(cfg)
     weak = _result(n_trades=50, bar_returns=pd.Series(np.zeros(100)))
-    res = v.validate_reports(weak, weak, weak, 0.0, n_tests=50)
+    # n_tests=1 applies DSR immediately (no family deferral).
+    res = v.validate_reports(weak, weak, weak, 0.0, n_tests=1)
     assert not res.accepted
     assert any("deflated_sharpe" in r for r in res.reasons)

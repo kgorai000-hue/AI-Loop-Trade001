@@ -5,8 +5,9 @@
 mt5:
   # Path to FxPro MT5 terminal executable (adjust for your install)
   path: ""
-  login: 0
-  password: ""
+  # login / password: NEVER put secrets here (tracked file).
+  # Use MT5_LOGIN / MT5_PASSWORD env, .env, or secrets.yaml (see secrets.example.yaml).
+  # Leave unset (login=0) to attach to an already-logged-in terminal session.
   server: "FxPro-Demo"
   timeout_ms: 10000
   reconnect_attempts: 3
@@ -121,7 +122,8 @@ anthropic:
   maker_candidates: 8
   max_retries: 5
   enable_prompt_cache: true
-  # API key: set ANTHROPIC_API_KEY in the environment (never commit secrets)
+  # API key: set ANTHROPIC_API_KEY in the environment / .env (never commit secrets)
+  # MT5 login/password: MT5_LOGIN / MT5_PASSWORD or secrets.yaml (never commit)
 
 kill_switch:
   max_drawdown: 0.10

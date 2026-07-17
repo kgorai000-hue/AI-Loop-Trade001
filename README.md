@@ -38,17 +38,29 @@ pip install -r requirements-windows.txt
 `requirements.txt` pins core scientific / Anthropic / pytest deps (used by CI on
 Linux). `requirements-windows.txt` adds the Windows-only `MetaTrader5` wheel.
 
-1. Edit `config.yaml`: `mt5.login`, `mt5.password`, `mt5.server`, and
-   `mt5.path` (full path to `terminal64.exe` if auto-detect fails).
-2. Set `ANTHROPIC_API_KEY` for Maker/Checker (optional; without it, optimize
+1. Edit `config.yaml`: `mt5.server` and `mt5.path` (full path to
+   `terminal64.exe` if auto-detect fails). Do **not** put login/password in
+   `config.yaml` (tracked by Git).
+2. Set MT5 credentials via environment / `.env` / gitignored `secrets.yaml`
+   (see `.env.example` and `secrets.example.yaml`). Leave them unset to attach
+   to an already-logged-in FxPro terminal session.
+3. Set `ANTHROPIC_API_KEY` for Maker/Checker (optional; without it, optimize
    falls back to grid search).
-3. Keep `EXECUTE: false` until backtests pass. Set `EXECUTE: true` only for demo
+4. Keep `EXECUTE: false` until backtests pass. Set `EXECUTE: true` only for demo
    (`account_type: demo`). Live requires `allow_live: true`.
 
-### Environment variable (PowerShell)
+### Secrets (PowerShell)
 
 ```powershell
-$env:ANTHROPIC_API_KEY = "sk-ant-..."
+# Option A: environment / .env
+copy .env.example .env
+# edit .env → ANTHROPIC_API_KEY, MT5_LOGIN, MT5_PASSWORD
+
+# Option B: gitignored YAML next to config
+copy secrets.example.yaml secrets.yaml
+# edit secrets.yaml → mt5.login / mt5.password
+
+$env:ANTHROPIC_API_KEY = "sk-ant-..."   # if not using .env
 cd C:\path\to\AI-Loop-Trade001
 .\.venv\Scripts\Activate.ps1
 python main.py loop
@@ -63,6 +75,9 @@ stay stopped in `LOCKED_AND_FLAT`).
 
 Run `python main.py loop` at logon via Task Scheduler (highest privileges if MT5
 needs them). Prefer a logged-on session where the MT5 terminal stays running.
+Relative `paths.state_dir` / `loop.log_dir` (and non-empty `mt5.path`) are
+resolved against the config file's directory at load time, so an empty Task
+Scheduler "Start in" folder cannot create a second `state/` tree.
 
 Only one `main.py` process may run per install: startup takes an OS-level lock
 (Windows named mutex + `state/.ai_loop_trade.lock`). A second start exits
@@ -119,13 +134,15 @@ python main.py review
 | Max drawdown | < 10% |
 | Sharpe | 1.5 ≤ Sharpe ≤ 3.0 |
 | Significance | HAC p-value (unadjusted); DSR/PBO handle selection bias |
-| DSR / PBO | Deflated Sharpe ≥ 0.95; search PBO ≤ 0.50 |
+| DSR / PBO | Deflated Sharpe ≥ 0.95 (SR* uses **cross-trial** Sharpe dispersion); search PBO ≤ 0.50 |
 | Sample size | ≥ 40 full-sample trades; ≥ 15 OOS; ≥ 10 per regime |
 | OOS | IS→OOS Sharpe degradation ≤ 30% |
 | Costs | Spread once + commission/slippage each way; ≥ 10 bps **round-trip** floor |
 
 Bootstrap p-values are optional diagnostics (`pvalue_method: block_bootstrap|max`).
-Do not pair them with Bonferroni at low `block_bootstrap_reps`: the floor
+The block bootstrap uses **fixed-length circular blocks** by default (wrap-around;
+no short tail blocks). Do not pair them with Bonferroni at low
+`block_bootstrap_reps`: the floor
 `1/(n_boot+1)` can sit above `alpha/m`, making every grid candidate impossible.
 If you enable a bootstrap gate, use `multiple_testing: none` or raise reps so
 `1/(n_boot+1) < alpha/m` (e.g. ≥12 000 for 120 tests at α=0.05). `fdr_bh` now

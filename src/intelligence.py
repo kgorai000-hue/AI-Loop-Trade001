@@ -16,7 +16,7 @@ from .maker import StrategyMaker
 from .optimizer import OptimizeOutcome, OptimizerConfig, ParameterOptimizer
 from .persistence import StateStore
 from .risk import CostModel, RiskManager
-from .search import apply_fdr_bh_gate, apply_pbo_gate, validation_ranking_row
+from .search import apply_search_family_gates, validation_ranking_row
 from .splits import chronological_rolling_oos, walk_forward_folds, with_warmup
 from .strategy import StrategyParams
 from .validator import StrategyValidator, ValidationResult
@@ -467,14 +467,7 @@ class IntelligenceLoop:
                         f"params={rev.params.as_dict()}"
                     )
 
-        best_params, best_val, accepted_count = apply_fdr_bh_gate(
-            validator=self.validator,
-            best_params=best_params,
-            best_val=best_val,
-            accepted_count=accepted_count,
-            rankings=rankings,
-        )
-        best_params, best_val, accepted_count, pbo = apply_pbo_gate(
+        best_params, best_val, accepted_count, pbo = apply_search_family_gates(
             validator=self.validator,
             state_store=self.state_store,
             best_params=best_params,

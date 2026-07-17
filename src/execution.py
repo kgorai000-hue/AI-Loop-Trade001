@@ -607,18 +607,16 @@ class OrderExecutor:
                 "order": ticket,
                 "symbol": symbol,
                 "comment": intent_comment(intent_id),
+                "magic": int(getattr(order, "magic", magic) or magic),
             }
-            try:
-                result = self.connection.order_send(request)
-            except MT5InvokeTimeout:
-                self._record_unknown_intent(
-                    intent_id=intent_id,
-                    symbol=symbol,
-                    kind="cancel",
-                    comment=intent_comment(intent_id),
-                    magic=magic,
-                    state_store=state_store,
-                )
+            send_result = self._send(
+                request,
+                "cancel",
+                intent_id=intent_id,
+                kind="cancel",
+                state_store=state_store,
+            )
+            if send_result.unknown:
                 return CancelPendingResult(
                     ok=False,
                     unknown=True,
@@ -632,17 +630,16 @@ class OrderExecutor:
                     failed=failed + [ticket],
                     remaining=attempted,
                 )
-            if result and self._retcode_ok(result.retcode):
+            if send_result.ok:
                 cancelled.append(ticket)
             else:
                 failed.append(ticket)
-                detail = None
-                if result is not None:
-                    detail = getattr(result, "comment", None) or getattr(result, "retcode", None)
-                else:
-                    detail = self.connection.last_error()
+                detail = send_result.message or send_result.retcode
                 logger.warning(
-                    "Failed to cancel pending order=%s detail=%s", ticket, detail
+                    "Cancel failed order=%s retcode=%s detail=%s",
+                    ticket,
+                    send_result.retcode,
+                    detail,
                 )
 
         remaining_orders = self.managed_pending(symbol, magic=magic)
@@ -1499,11 +1496,95 @@ class OrderExecutor:
             return False
 
     @classmethod
+    def _check_retcode_ok(cls, retcode: Any) -> bool:
+        """``order_check`` success: broker may return 0 or TRADE_RETCODE_DONE."""
+        try:
+            code = int(retcode)
+        except (TypeError, ValueError):
+            return False
+        return code == 0 or code == int(mt5.TRADE_RETCODE_DONE)
+
+    @classmethod
     def _retcode_ok(cls, retcode: Any) -> bool:
         try:
             return int(retcode) in cls._success_retcodes()
         except (TypeError, ValueError):
             return False
+
+    def _preflight_check(
+        self,
+        request: dict[str, Any],
+        operation: str,
+        *,
+        intent_id: Optional[str] = None,
+    ) -> Optional[OrderResult]:
+        """Run MT5 ``order_check``; return a failed OrderResult or None if OK.
+
+        Covers volume / price / stop level / margin / trade permissions /
+        filling mode / market state as enforced by the terminal & broker.
+        """
+        try:
+            check = self.connection.order_check(request)
+        except MT5InvokeTimeout as exc:
+            logger.error(
+                "%s order_check timed out (%s); refusing order_send",
+                operation,
+                exc.fn_name,
+            )
+            return OrderResult(
+                ok=False,
+                intent_id=intent_id,
+                message=(
+                    f"order_check timeout ({exc.fn_name}); order_send not attempted"
+                ),
+                request=request,
+            )
+        except Exception as exc:  # noqa: BLE001 — fail closed before live send
+            logger.exception("%s order_check raised; refusing order_send", operation)
+            return OrderResult(
+                ok=False,
+                intent_id=intent_id,
+                message=f"order_check error: {exc}",
+                request=request,
+            )
+
+        if check is None:
+            err = self.connection.last_error()
+            logger.error("%s order_check returned None: %s", operation, err)
+            return OrderResult(
+                ok=False,
+                intent_id=intent_id,
+                message=f"order_check failed: {err}",
+                request=request,
+            )
+
+        retcode = getattr(check, "retcode", None)
+        comment = getattr(check, "comment", "") or ""
+        if not self._check_retcode_ok(retcode):
+            logger.warning(
+                "%s order_check rejected retcode=%s comment=%s margin=%s "
+                "margin_free=%s",
+                operation,
+                retcode,
+                comment,
+                getattr(check, "margin", None),
+                getattr(check, "margin_free", None),
+            )
+            return OrderResult(
+                ok=False,
+                retcode=int(retcode) if retcode is not None else None,
+                intent_id=intent_id,
+                message=f"order_check rejected: {comment or retcode}",
+                request=request,
+            )
+        logger.debug(
+            "%s order_check ok retcode=%s margin=%s margin_free=%s",
+            operation,
+            retcode,
+            getattr(check, "margin", None),
+            getattr(check, "margin_free", None),
+        )
+        return None
 
     def _send(
         self,
@@ -1521,6 +1602,10 @@ class OrderExecutor:
         comment = str(request.get("comment") or intent_comment(intent_id))[:31]
         request = dict(request)
         request["comment"] = comment
+
+        check_fail = self._preflight_check(request, operation, intent_id=intent_id)
+        if check_fail is not None:
+            return check_fail
 
         try:
             result = self.connection.order_send(request)

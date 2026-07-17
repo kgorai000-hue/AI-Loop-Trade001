@@ -34,6 +34,20 @@ class Connection:
             return mt5.orders_get()
         return mt5.orders_get(symbol=symbol)
 
+    def order_check(self, request):
+        # Default pass so unit tests exercise order_send; override to fail.
+        return SimpleNamespace(
+            retcode=mt5.TRADE_RETCODE_DONE,
+            balance=0.0,
+            equity=0.0,
+            profit=0.0,
+            margin=0.0,
+            margin_free=0.0,
+            margin_level=0.0,
+            comment="Done",
+            request=request,
+        )
+
     def order_send(self, request):
         return mt5.order_send(request)
 
@@ -692,6 +706,103 @@ def test_successful_cancel_then_flat_requires_zero_pending(monkeypatch):
     assert "positions=0, pending=0" in result.message
     assert book["orders"] == []
     assert book["positions"] == []
+
+
+def test_order_check_blocks_order_send(monkeypatch):
+    sent = []
+
+    class RejectCheck(Connection):
+        def order_check(self, request):
+            return SimpleNamespace(
+                retcode=10019,  # TRADE_RETCODE_NO_MONEY typical
+                comment="No money",
+                margin=999.0,
+                margin_free=0.0,
+                request=request,
+            )
+
+        def order_send(self, request):
+            sent.append(request)
+            raise AssertionError("order_send must not run after failed order_check")
+
+    monkeypatch.setattr(mt5, "positions_get", lambda **kwargs: [])
+    monkeypatch.setattr(mt5, "orders_get", lambda **kwargs: [])
+    monkeypatch.setattr(
+        mt5,
+        "symbol_info_tick",
+        lambda symbol: SimpleNamespace(bid=40000.0, ask=40001.0),
+    )
+
+    executor = OrderExecutor(RejectCheck(), execute=True, account_type="demo")
+    result = executor.reconcile_target(symbol="#US30", side=Signal.LONG, volume=1.0)
+    assert result.ok is False
+    assert sent == []
+    assert any("order_check" in (o.message or "") for o in result.orders)
+
+
+def test_order_check_none_blocks_order_send():
+    sent = []
+
+    class NoneCheck(Connection):
+        def order_check(self, request):
+            return None
+
+        def order_send(self, request):
+            sent.append(request)
+            return None
+
+        def last_error(self):
+            return (-1, "check unavailable")
+
+    executor = OrderExecutor(NoneCheck(), execute=True, account_type="demo")
+    result = executor._send(
+        {
+            "action": mt5.TRADE_ACTION_PENDING,
+            "symbol": "#US30",
+            "volume": 0.01,
+            "type": mt5.ORDER_TYPE_BUY_LIMIT,
+            "price": 40000.0,
+            "magic": 260717,
+            "comment": "iabc",
+            "type_filling": mt5.ORDER_FILLING_RETURN,
+        },
+        "order",
+    )
+    assert result.ok is False
+    assert "order_check" in result.message
+    assert sent == []
+
+
+def test_order_check_zero_retcode_allows_send(monkeypatch):
+    """Some terminals report order_check success as retcode=0."""
+    sent = []
+
+    class ZeroOk(Connection):
+        def order_check(self, request):
+            return SimpleNamespace(retcode=0, comment="Done", request=request)
+
+        def order_send(self, request):
+            sent.append(request)
+            return SimpleNamespace(
+                retcode=mt5.TRADE_RETCODE_PLACED, order=1, deal=0, comment="placed"
+            )
+
+    executor = OrderExecutor(ZeroOk(), execute=True, account_type="demo")
+    result = executor._send(
+        {
+            "action": mt5.TRADE_ACTION_PENDING,
+            "symbol": "#US30",
+            "volume": 0.01,
+            "type": mt5.ORDER_TYPE_BUY_LIMIT,
+            "price": 40000.0,
+            "magic": 260717,
+            "comment": "iabc",
+            "type_filling": mt5.ORDER_FILLING_RETURN,
+        },
+        "order",
+    )
+    assert result.ok is True
+    assert len(sent) == 1
 
 
 def test_send_timeout_is_unknown_not_failure(monkeypatch):

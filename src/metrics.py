@@ -23,6 +23,8 @@ from .inference import (  # noqa: F401
     regime_trade_counts,
     returns_pvalue,
     sharpe_ratio_variance,
+    trial_sharpe_dispersion,
+    nonannual_sharpe,
 )
 
 BARS_PER_YEAR_M30 = 48 * 252  # ~30m bars in a trading year
