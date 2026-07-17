@@ -1,0 +1,80 @@
+# FxPro MT5 Autonomous Loop 001 — Maker/Checker + math Validator
+# EXECUTE must be true AND account_type must be demo (or live with allow_live=true)
+# before any real order is sent.
+
+mt5:
+  # Path to FxPro MT5 terminal executable (adjust for your install)
+  path: ""
+  login: 0
+  password: ""
+  server: "FxPro-Demo"
+  timeout_ms: 10000
+  reconnect_attempts: 3
+  reconnect_delay_sec: 2.0
+
+account_type: demo   # demo | live
+allow_live: false    # must be true to trade on a live account
+EXECUTE: false       # master kill-switch for order submission
+
+symbols:
+  - name: "#US30"
+    state_key: "US30"
+    timeframe: "M30"
+    long_window: 240
+    short_window: 48
+    enabled: true
+
+strategy:
+  # Defaults used when STATE.md has no optimized params
+  long_window: 240
+  short_window: 48
+  # Holding / exit: reverse signal flips position; optional bars hold
+  max_hold_bars: 16
+
+risk:
+  half_kelly: true
+  min_cost_bps: 10          # 0.1% floor when MT5 cost unavailable
+  default_win_rate: 0.52
+  default_reward_risk: 1.5
+  max_fraction: 0.25        # hard cap on kelly fraction
+  max_lots: 5.0
+  min_lots: 0.01
+  lookback_trades: 50       # for empirical W / R estimation
+
+validator:
+  lookback_months: 6
+  max_drawdown: 0.10
+  sharpe_min: 1.5
+  sharpe_max: 3.0
+  p_value_max: 0.05
+  oos_degradation_max: 0.30
+  is_fraction: 0.70
+
+optimizer:
+  long_windows: [180, 200, 220, 240, 260, 280]
+  short_windows: [24, 36, 48, 60, 72]
+  max_hold_bars: [8, 12, 16, 24]
+  sharpe_degrade_trigger: 0.20   # relative drop vs last accepted
+  ic_degrade_trigger: 0.20
+
+anthropic:
+  maker_model: "claude-sonnet-4-5"
+  checker_model: "claude-opus-4"
+  maker_candidates: 8
+  max_retries: 5
+  enable_prompt_cache: true
+  # API key: set ANTHROPIC_API_KEY in the environment (never commit secrets)
+
+kill_switch:
+  max_drawdown: 0.10
+  poll_seconds: 15
+
+loop:
+  poll_seconds: 30
+  bar_timeframe_minutes: 30
+  review_weekday: 5          # Saturday (Mon=0)
+  review_hour_utc: 6
+  log_dir: "logs"
+
+paths:
+  state_dir: "state"
