@@ -65,6 +65,21 @@ class ReconcileResult:
         }
 
 
+@dataclass
+class CancelPendingResult:
+    """Outcome of cancelling managed pending orders, including post-check."""
+
+    ok: bool
+    message: str = ""
+    dry_run: bool = False
+    skipped: bool = False
+    fetch_failed: bool = False
+    attempted: list[int] = field(default_factory=list)
+    cancelled: list[int] = field(default_factory=list)
+    failed: list[int] = field(default_factory=list)
+    remaining: list[int] = field(default_factory=list)
+
+
 class OrderExecutor:
     """Execute only the delta between actual and desired strategy positions."""
 
@@ -224,34 +239,118 @@ class OrderExecutor:
             return OrderResult(ok=True, message=f"dry-run: {reason}", dry_run=True, request=request)
         return self._send(request, "order")
 
-    def cancel_pending(self, symbol: str, magic: int = 260717) -> Optional[int]:
-        """Cancel pending orders only after the same account safety gate as entry.
+    def cancel_pending(self, symbol: str, magic: int = 260717) -> CancelPendingResult:
+        """Cancel managed pending orders and re-verify none remain.
 
-        Returns cancelled count, 0 when intentionally skipped (dry-run / blocked),
-        or None when the orders query failed.
+        Success requires a post-cancel ``orders_get`` showing zero managed
+        pending for ``magic``. Failures stop callers from opening / claiming flat.
         """
         allowed, reason = self.can_execute()
-        if not allowed:
-            logger.info("Pending cancel skipped (%s) symbol=%s magic=%s", reason, symbol, magic)
-            return 0
         orders = self._orders_get(symbol)
         if orders is None:
-            return None
-        cancelled = 0
-        for order in orders:
-            if magic != 0 and int(getattr(order, "magic", 0) or 0) != magic:
-                continue
+            return CancelPendingResult(
+                ok=False,
+                fetch_failed=True,
+                message=f"orders_get failed for {symbol}",
+            )
+
+        targets = [
+            o
+            for o in orders
+            if magic == 0 or int(getattr(o, "magic", 0) or 0) == magic
+        ]
+        attempted = [int(o.ticket) for o in targets]
+        if not targets:
+            return CancelPendingResult(ok=True, message="no pending")
+
+        if not allowed:
+            logger.info(
+                "Pending cancel blocked (%s) symbol=%s tickets=%s",
+                reason,
+                symbol,
+                attempted,
+            )
+            return CancelPendingResult(
+                ok=False,
+                skipped=True,
+                dry_run=True,
+                message=f"cancel blocked ({reason}); pending remain {attempted}",
+                attempted=attempted,
+                remaining=attempted,
+            )
+
+        cancelled: list[int] = []
+        failed: list[int] = []
+        for order in targets:
+            ticket = int(order.ticket)
             request = {
                 "action": mt5.TRADE_ACTION_REMOVE,
-                "order": int(order.ticket),
+                "order": ticket,
                 "symbol": symbol,
             }
             result = mt5.order_send(request)
             if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-                cancelled += 1
+                cancelled.append(ticket)
             else:
-                logger.warning("Failed to cancel pending order=%s", order.ticket)
-        return cancelled
+                failed.append(ticket)
+                detail = None
+                if result is not None:
+                    detail = getattr(result, "comment", None) or getattr(result, "retcode", None)
+                else:
+                    detail = mt5.last_error()
+                logger.warning(
+                    "Failed to cancel pending order=%s detail=%s", ticket, detail
+                )
+
+        remaining_orders = self.managed_pending(symbol, magic=magic)
+        if remaining_orders is None:
+            return CancelPendingResult(
+                ok=False,
+                fetch_failed=True,
+                message=f"orders_get re-check failed for {symbol}",
+                attempted=attempted,
+                cancelled=cancelled,
+                failed=failed,
+            )
+
+        remaining = [int(o.ticket) for o in remaining_orders]
+        if remaining or failed:
+            message = (
+                f"cancel incomplete attempted={attempted} cancelled={cancelled} "
+                f"failed={failed} remaining={remaining}"
+            )
+            logger.error("%s symbol=%s", message, symbol)
+            return CancelPendingResult(
+                ok=False,
+                message=message,
+                attempted=attempted,
+                cancelled=cancelled,
+                failed=failed,
+                remaining=remaining,
+            )
+
+        return CancelPendingResult(
+            ok=True,
+            message=f"cancelled {cancelled}" if cancelled else "no pending",
+            attempted=attempted,
+            cancelled=cancelled,
+        )
+
+    def _require_pending_cleared(
+        self, symbol: str, magic: int = 260717
+    ) -> Optional[ReconcileResult]:
+        """Cancel managed pending; return a failure result when not fully clear."""
+        result = self.cancel_pending(symbol, magic=magic)
+        if result.fetch_failed:
+            return self._fetch_failed("orders", symbol)
+        if not result.ok:
+            return ReconcileResult(
+                ok=False,
+                action="cancel_failed",
+                message=result.message,
+                dry_run=result.dry_run,
+            )
+        return None
 
     def close_position_market(self, position: Any, magic: int = 260717) -> OrderResult:
         """Close one exact MT5 position ticket using a market deal."""
@@ -306,8 +405,9 @@ class OrderExecutor:
         Reversals and resizes use close-then-open. Matching pending limit
         orders are left alone (`await_fill`) so unfilled entries are not
         cancelled and re-placed every bar. MT5 query failures (`None`) abort
-        all open / reverse / resize / flatten-complete paths. Partial-fill
-        retries remain a later MT5 integration step.
+        all open / reverse / resize / flatten-complete paths. Pending cancel
+        must clear to zero (re-checked via ``orders_get``) before new entries
+        or flatten-success. Partial-fill retries remain a later MT5 step.
         """
         positions = self.managed_positions(symbol, magic=magic)
         pending = self.managed_pending(symbol, magic=magic)
@@ -323,17 +423,53 @@ class OrderExecutor:
         tolerance = max(float(volume_step), 1e-9) / 2.0
 
         if side == Signal.FLAT or volume <= 0:
-            cancelled = self.cancel_pending(symbol, magic=magic)
-            if cancelled is None:
-                return self._fetch_failed("orders", symbol)
+            cancel_err = self._require_pending_cleared(symbol, magic=magic)
+            if cancel_err is not None:
+                return cancel_err
             closes = self.close_managed_positions(symbol, magic=magic)
             if closes is None:
                 return self._fetch_failed("positions", symbol)
+            if any(not r.ok for r in closes):
+                return ReconcileResult(
+                    ok=False,
+                    action="close_failed",
+                    message="flatten close failed",
+                    dry_run=any(r.dry_run for r in closes),
+                    orders=closes,
+                )
+
+            positions_after = self.managed_positions(symbol, magic=magic)
+            pending_after = self.managed_pending(symbol, magic=magic)
+            if positions_after is None:
+                return self._fetch_failed("positions", symbol)
+            if pending_after is None:
+                return self._fetch_failed("orders", symbol)
+
+            dry = any(r.dry_run for r in closes)
+            # Live flat success: positions=0 and pending=0. Dry-run closes do not
+            # remove positions, so only pending clearance is enforced there.
+            if pending_after or (positions_after and not dry):
+                return ReconcileResult(
+                    ok=False,
+                    action="flatten_incomplete",
+                    message=(
+                        f"flat requires positions=0 and pending=0; "
+                        f"got positions={len(positions_after)} pending={len(pending_after)}"
+                    ),
+                    dry_run=dry,
+                    orders=closes,
+                )
+
+            had_exposure = bool(positions or pending)
             return ReconcileResult(
-                ok=all(r.ok for r in closes),
-                action="flatten" if positions or pending else "hold_flat",
-                message="target flat",
-                dry_run=any(r.dry_run for r in closes),
+                ok=True,
+                action="flatten" if had_exposure else "hold_flat",
+                message=(
+                    "dry-run flat (pending=0; position closes simulated)"
+                    if dry
+                    else "target flat (positions=0, pending=0)"
+                ),
+                dry_run=dry,
                 orders=closes,
             )
 
@@ -344,9 +480,9 @@ class OrderExecutor:
         )
         if matches:
             # Position already filled — drop any leftover working orders.
-            cancelled = self.cancel_pending(symbol, magic=magic)
-            if cancelled is None:
-                return self._fetch_failed("orders", symbol)
+            cancel_err = self._require_pending_cleared(symbol, magic=magic)
+            if cancel_err is not None:
+                return cancel_err
             return ReconcileResult(ok=True, action="hold", message="target already satisfied")
 
         # Flat (or wrong size) but a matching limit is already working → wait.
@@ -373,9 +509,9 @@ class OrderExecutor:
                     message="matching pending limit already working",
                 )
 
-        cancelled = self.cancel_pending(symbol, magic=magic)
-        if cancelled is None:
-            return self._fetch_failed("orders", symbol)
+        cancel_err = self._require_pending_cleared(symbol, magic=magic)
+        if cancel_err is not None:
+            return cancel_err
         closes = self.close_managed_positions(symbol, magic=magic)
         if closes is None:
             return self._fetch_failed("positions", symbol)
@@ -384,6 +520,22 @@ class OrderExecutor:
                 ok=False,
                 action="close_failed",
                 message="existing position close failed; new entry blocked",
+                dry_run=any(r.dry_run for r in closes),
+                orders=closes,
+            )
+
+        # Re-check before new entry: no managed pending may remain.
+        pending_before_entry = self.managed_pending(symbol, magic=magic)
+        if pending_before_entry is None:
+            return self._fetch_failed("orders", symbol)
+        if pending_before_entry:
+            return ReconcileResult(
+                ok=False,
+                action="cancel_failed",
+                message=(
+                    "managed pending remain before new entry: "
+                    f"{[int(o.ticket) for o in pending_before_entry]}"
+                ),
                 dry_run=any(r.dry_run for r in closes),
                 orders=closes,
             )
@@ -423,9 +575,25 @@ class OrderExecutor:
 
     def close_all(self, symbol: str, magic: int = 260717) -> OrderResult:
         """Kill-switch flatten for all positions on a symbol."""
-        cancelled = self.cancel_pending(symbol, magic=0)
-        if cancelled is None:
+        cancel = self.cancel_pending(symbol, magic=0)
+        if cancel.fetch_failed:
             return OrderResult(ok=False, message="orders_get failed; flatten aborted")
+        if not cancel.ok:
+            return OrderResult(
+                ok=False,
+                message=f"cancel_failed; flatten aborted ({cancel.message})",
+            )
+
+        pending = self.managed_pending(symbol, magic=0)
+        if pending is None:
+            return OrderResult(ok=False, message="orders_get failed; flatten aborted")
+        if pending:
+            tickets = [int(o.ticket) for o in pending]
+            return OrderResult(
+                ok=False,
+                message=f"pending remain after cancel; flatten aborted tickets={tickets}",
+            )
+
         positions = self.managed_positions(symbol, magic=0)
         if positions is None:
             return OrderResult(ok=False, message="positions_get failed; flatten aborted")
