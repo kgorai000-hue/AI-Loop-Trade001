@@ -124,8 +124,10 @@ def test_reversal_closes_exact_ticket_before_new_entry(monkeypatch):
     assert len(sent) == 2
     assert sent[0]["action"] == mt5.TRADE_ACTION_DEAL
     assert sent[0]["position"] == 77
+    assert sent[0]["type_filling"] == mt5.ORDER_FILLING_IOC
     assert sent[1]["action"] == mt5.TRADE_ACTION_PENDING
     assert sent[1]["type"] == mt5.ORDER_TYPE_SELL_LIMIT
+    assert sent[1]["type_filling"] == mt5.ORDER_FILLING_RETURN
     assert "awaiting fill" in result.message
 
 
@@ -159,6 +161,13 @@ def test_place_limit_includes_stop_loss(monkeypatch):
 
     assert result.ok is True
     assert sent[-1]["sl"] == 39500.0
+    assert sent[-1]["type_filling"] == mt5.ORDER_FILLING_RETURN
+
+
+def test_pending_ignores_symbol_ioc_filling_flag():
+    info = SimpleNamespace(filling_mode=2)  # SYMBOL_FILLING_IOC
+    assert OrderExecutor._pending_filling_mode() == mt5.ORDER_FILLING_RETURN
+    assert OrderExecutor._deal_filling_mode(info) == mt5.ORDER_FILLING_IOC
 
 
 def test_positions_get_none_does_not_open_as_flat(monkeypatch):

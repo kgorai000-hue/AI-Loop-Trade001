@@ -234,7 +234,8 @@ class OrderExecutor:
             "magic": int(req.magic),
             "comment": req.comment[:31],
             "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": self._filling_mode(info),
+            # Pending orders must use RETURN per MT5; symbol IOC/FOK flags apply to deals only.
+            "type_filling": self._pending_filling_mode(),
         }
         if req.sl is not None and float(req.sl) > 0:
             sl = float(req.sl)
@@ -400,7 +401,7 @@ class OrderExecutor:
             "deviation": 50,
             "magic": int(magic),
             "comment": "lr_flat",
-            "type_filling": self._filling_mode(info),
+            "type_filling": self._deal_filling_mode(info),
         }
         if not allowed:
             logger.info("DRY-RUN close skipped (%s): %s", reason, request)
@@ -661,7 +662,13 @@ class OrderExecutor:
         )
 
     @staticmethod
-    def _filling_mode(info: Any) -> int:
+    def _pending_filling_mode() -> int:
+        """Filling mode for pending orders (limit/stop). Always RETURN."""
+        return mt5.ORDER_FILLING_RETURN
+
+    @staticmethod
+    def _deal_filling_mode(info: Any) -> int:
+        """Filling mode for market deals (close / instant execution)."""
         filling = getattr(info, "filling_mode", None)
         try:
             mode = int(filling) if filling is not None else 0
